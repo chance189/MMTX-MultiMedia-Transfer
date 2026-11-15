@@ -19,7 +19,7 @@ from ..manifest import find_manifest
 from ..scanner import scan_working
 from ..transfer import ChecksumRunner, VerifyRunner, find_manifest_folders
 from . import theme
-from .widgets import Card, NumItem, PathPicker, button, label, ro_item
+from .widgets import Card, NumItem, PathPicker, PillDelegate, button, label, page_header, ro_item
 
 COLS = ["Folder", "Algorithm", "Verified", "Mismatch", "Missing", "Not in manifest", "Result"]
 
@@ -31,8 +31,10 @@ class VerifyTab(QWidget):
         self.host = host
         self.s = host.settings
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 12, 0, 0)
-        root.setSpacing(12)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(14)
+        hrow, _t, _s = page_header("Verify", "Re-read footage from disk and prove it still matches the checksums recorded when it was copied.")
+        root.addLayout(hrow)
 
         c = Card("Check footage against its recorded checksums")
         c.body.addWidget(label(
@@ -52,7 +54,7 @@ class VerifyTab(QWidget):
         self.create_btn = button("Create missing checksums", tip="Hash dated folders that have no manifest yet",
                                  slot=self._create)
         row.addWidget(self.create_btn)
-        self.go = button("Verify checksums", "Primary", slot=self._verify)
+        self.go = button("Verify checksums", "Primary", slot=self._verify, icon_name="verify", icon_color="#ffffff")
         self.go.setMinimumWidth(220)
         row.addWidget(self.go)
         c.body.addLayout(row)
@@ -66,7 +68,8 @@ class VerifyTab(QWidget):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setShowGrid(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.verticalHeader().setDefaultSectionSize(32)
+        self.table.verticalHeader().setDefaultSectionSize(36)
+        self.table.setItemDelegateForColumn(6, PillDelegate(self.table))
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Stretch)
         for i, w in enumerate([0, 90, 80, 80, 80, 120, 140]):
@@ -129,7 +132,7 @@ class VerifyTab(QWidget):
                 it.setToolTip("Files added after the manifest was written (e.g. project files):\n" + "\n".join(row["extra"][:40]))
             self.table.setItem(r, 2 + i, it)
         bad = row["mismatch"] or row["missing"]
-        res = ro_item("✕ PROBLEMS" if bad else "✓ Bit-perfect")
+        res = ro_item("✕  Problems" if bad else "✓  Bit-perfect")
         res.setForeground(QColor(theme.DANGER if bad else theme.SUCCESS))
         self.table.setItem(r, 6, res)
         self.table.scrollToBottom()

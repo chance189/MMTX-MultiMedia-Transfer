@@ -6,8 +6,8 @@ import os
 import traceback
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, QThread, QUrl, Qt, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QObject, QRectF, QSize, QThread, QUrl, Qt, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -15,12 +15,17 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QStyle,
+    QStyledItemDelegate,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from ..drives import drive_info
 from ..transfer import free_bytes, human_bytes
+from . import theme
+from .icons import camera_style, icon
 
 
 def open_path(path: str) -> None:
@@ -49,8 +54,12 @@ def label(text: str = "", obj: str = "", wrap: bool = False) -> QLabel:
     return lab
 
 
-def button(text: str, obj: str = "", tip: str = "", slot: Optional[Callable] = None) -> QPushButton:
+def button(text: str, obj: str = "", tip: str = "", slot: Optional[Callable] = None,
+           icon_name: str = "", icon_color: str = "#c3cad8") -> QPushButton:
     b = QPushButton(text)
+    if icon_name:
+        b.setIcon(icon(icon_name, icon_color, 18))
+        b.setIconSize(QSize(16, 16))
     if obj:
         b.setObjectName(obj)
     if tip:
@@ -78,7 +87,7 @@ class PathPicker(QWidget):
         self.edit.setPlaceholderText(placeholder)
         self.edit.editingFinished.connect(self._emit)
         row.addWidget(self.edit, 1)
-        row.addWidget(button("Browse…", slot=self._browse))
+        row.addWidget(button("Browse…", slot=self._browse, icon_name="folder"))
         self.open_btn = button("Open", "Ghost", "Open in file manager", lambda: open_path(self.path()))
         row.addWidget(self.open_btn)
         lay.addLayout(row)
@@ -119,6 +128,10 @@ class PathPicker(QWidget):
         fb = free_bytes(p)
         exists = os.path.isdir(p)
         txt = f"{human_bytes(fb)} free" if fb >= 0 else "drive not found"
+        if fb >= 0:
+            kind = drive_info(p).label
+            if kind:
+                txt += f"  ·  {kind}"
         if not exists and fb >= 0:
             txt += "  ·  folder will be created"
         self.free.setText(txt)
@@ -169,3 +182,168 @@ class Worker(QThread):
             self.bridge.finished.emit(res)
         except Exception:  # noqa: BLE001
             self.bridge.failed.emit(traceback.format_exc())
+
+
+# ---------------------------------------------------------------- visual bits
+
+
+def set_pill(lab: QLabel, text: str, tone: str) -> None:
+    """tone: info | ok | warn | bad | muted (styled in theme via QLabel#Pill[tone=...])."""
+    lab.setText(text)
+    lab.setProperty("tone", tone)
+    lab.style().unpolish(lab)
+    lab.style().polish(lab)
+
+
+def pill(text: str = "", tone: str = "muted") -> QLabel:
+    lab = QLabel()
+    lab.setObjectName("Pill")
+    set_pill(lab, text, tone)
+    return lab
+
+
+def page_header(title: str, subtitle: str = "") -> tuple[QHBoxLayout, QLabel, QLabel]:
+    row = QHBoxLayout()
+    row.setSpacing(12)
+    col = QVBoxLayout()
+    col.setSpacing(2)
+    t = label(title, "PageTitle")
+    sub = label(subtitle, "Muted", wrap=True)
+    col.addWidget(t)
+    col.addWidget(sub)
+    row.addLayout(col, 1)
+    return row, t, sub
+
+
+class CamBadge(QWidget):
+    """Rounded colored square with a short camera tag (GP / DJI / 360 / SNY)."""
+
+    def __init__(self, label_or_profile: str = "", size: int = 34, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.set_camera(label_or_profile)
+
+    def set_camera(self, label_or_profile: str) -> None:
+        self.text, self.color = camera_style(label_or_profile)
+        self.update()
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        c = QColor(self.color)
+        bg = QColor(c)
+        bg.setAlpha(40)
+        p.setPen(QPen(QColor(c.red(), c.green(), c.blue(), 120), 1))
+        p.setBrush(bg)
+        p.drawRoundedRect(r, r.width() * 0.28, r.width() * 0.28)
+        f = QFont(self.font())
+        f.setBold(True)
+        f.setPointSizeF(max(6.5, self.width() * (0.26 if len(self.text) <= 2 else 0.21)))
+        p.setFont(f)
+        p.setPen(c)
+        p.drawText(r, Qt.AlignCenter, self.text)
+
+
+class DateTile(QWidget):
+    """Little calendar page: NOV / 14 / SAT."""
+
+    def __init__(self, day, parent=None):
+        super().__init__(parent)
+        self.day = day
+        self.setFixedSize(54, 60)
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(r, 10, 10)
+        p.fillPath(path, QColor("#1a2030"))
+        p.setPen(QPen(QColor("#283044"), 1))
+        p.drawPath(path)
+        f = QFont(self.font())
+        f.setBold(True)
+        f.setPointSizeF(7.6)
+        p.setFont(f)
+        p.setPen(QColor(theme.ACCENT))
+        p.drawText(QRectF(r.x(), r.y() + 5, r.width(), 12), Qt.AlignCenter, self.day.strftime("%b").upper())
+        f.setPointSizeF(17)
+        p.setFont(f)
+        p.setPen(QColor(theme.TEXT))
+        p.drawText(QRectF(r.x(), r.y() + 15, r.width(), 28), Qt.AlignCenter, str(self.day.day))
+        f.setPointSizeF(7.2)
+        f.setBold(False)
+        p.setFont(f)
+        p.setPen(QColor(theme.MUTED))
+        p.drawText(QRectF(r.x(), r.y() + 42, r.width(), 12), Qt.AlignCenter, self.day.strftime("%a").upper())
+
+
+class PillDelegate(QStyledItemDelegate):
+    """Draws a table cell's text as a tinted pill using the item's foreground color."""
+
+    def paint(self, p, opt, index):  # noqa: D401
+        self.initStyleOption(opt, index)
+        text = index.data(Qt.DisplayRole) or ""
+        if not text:
+            return super().paint(p, opt, index)
+        brush = index.data(Qt.ForegroundRole)
+        color = brush.color() if brush is not None else QColor(theme.MUTED)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing)
+        if opt.state & QStyle.State_Selected:  # keep row highlight
+            p.fillRect(opt.rect, opt.palette.highlight())
+        f = QFont(opt.font)
+        f.setPointSizeF(8.6)
+        f.setBold(True)
+        fm = QFontMetrics(f)
+        w = min(opt.rect.width() - 8, fm.horizontalAdvance(text) + 18)
+        h = fm.height() + 6
+        rect = QRectF(opt.rect.x() + 4, opt.rect.center().y() - h / 2 + 1, w, h)
+        bg = QColor(color)
+        bg.setAlpha(36)
+        p.setPen(Qt.NoPen)
+        p.setBrush(bg)
+        p.drawRoundedRect(rect, h / 2, h / 2)
+        p.setPen(color)
+        p.setFont(f)
+        p.drawText(rect, Qt.AlignCenter, fm.elidedText(text, Qt.ElideRight, int(w) - 12))
+        p.restore()
+
+
+class ThumbView(QWidget):
+    """Rounded pixmap display (progress bar thumbnail, archive posters)."""
+
+    def __init__(self, w: int, h: int, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(w, h)
+        self.pm = None
+        self.glyph = "film"
+
+    def set_pixmap(self, pm) -> None:
+        self.pm = pm
+        self.update()
+
+    def paintEvent(self, _e):  # noqa: N802
+        from .icons import draw_glyph
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(r, 8, 8)
+        p.setClipPath(path)
+        if self.pm is not None and not self.pm.isNull():
+            pw, ph = self.pm.width() / self.pm.devicePixelRatio(), self.pm.height() / self.pm.devicePixelRatio()
+            sc = max(r.width() / pw, r.height() / ph)
+            sw, sh = r.width() / sc, r.height() / sc
+            p.drawPixmap(r, self.pm, QRectF((pw - sw) / 2, (ph - sh) / 2, sw, sh))
+        else:
+            p.fillRect(r, QColor("#1a2030"))
+            g = min(r.width(), r.height()) * 0.45
+            draw_glyph(p, self.glyph, QRectF(r.center().x() - g / 2, r.center().y() - g / 2, g, g), "#3d4659", 1.5)
+        p.setClipping(False)
+        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(r, 8, 8)

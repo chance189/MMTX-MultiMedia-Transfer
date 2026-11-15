@@ -10,6 +10,7 @@ from typing import Optional
 from PySide6.QtCore import QStorageInfo
 
 from ..cameras import card_signature
+from ..drives import drive_info
 
 _LINUX_SKIP_PREFIX = ("/boot", "/snap", "/proc", "/sys", "/dev", "/var", "/usr", "/etc", "/tmp", "/opt", "/run/user")
 _SKIP_FS = {"squashfs", "tmpfs", "devtmpfs", "overlay", "proc", "sysfs", "efivarfs", "fuse.snapfuse", "autofs", "cgroup2"}
@@ -38,6 +39,7 @@ class Volume:
     fs: str
     camera: Optional[str]
     read_only: bool
+    kind: str = ""
 
 
 def filesystem_type(path: str) -> str:
@@ -77,7 +79,7 @@ def list_volumes() -> list[Volume]:
                 _camera_cache[root] = None
         cam = _camera_cache[root]
         out.append(Volume(root=os.path.normpath(root), name=v.name() or v.displayName(), total=v.bytesTotal(),
-                          fs=fs, camera=cam, read_only=v.isReadOnly()))
+                          fs=fs, camera=cam, read_only=v.isReadOnly(), kind=drive_info(root).label))
     for gone in set(_camera_cache) - seen:  # card pulled: forget it so a new card re-probes
         _camera_cache.pop(gone, None)
     out.sort(key=lambda x: (x.camera is None, x.root.lower()))

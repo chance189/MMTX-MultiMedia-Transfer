@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -34,8 +35,12 @@ def _env():
     return tmp, cards, work, arch
 
 
+WORKERS = int(os.environ.get("MMTX_TEST_WORKERS", "1"))
+
+
 def _offload(card, work, titles, **kw):
     scan = scan_card(card)
+    kw.setdefault("workers", WORKERS)
     opts = OffloadOptions(algo="xxh128", **kw)
     dev = {p: lbl.replace(" ", "_") for p, lbl in scan.devices.items()}
     sel = [(d, day_folder_name(d.day, titles.get(d.day.isoformat(), "Run"))) for d in scan.days]
@@ -82,7 +87,7 @@ def test_offload_all_cameras_and_resume():
         # resume: running the same offload again copies nothing and proves everything
         scan, job, dev, opts = _offload(cards["gopro"], work, {"2026-11-14": "Daily Run", "2026-11-13": "Beach"})
         for d in scan.days:
-            present, total = day_presence(d, os.path.join(work, day_folder_name(d.day, {"2026-11-14": "Daily Run", "2026-11-13": "Beach"}[d.day.isoformat()])), dev, opts)
+            present, total, _ = day_presence(d, os.path.join(work, day_folder_name(d.day, {"2026-11-14": "Daily Run", "2026-11-13": "Beach"}[d.day.isoformat()])), dev, opts)
             assert present == total
         res = TransferRunner(job).run()
         assert res.ok and res.files_copied == 0 and res.files_skipped == len(scan.files)
@@ -198,7 +203,7 @@ def test_archive_move_copy_verify_bitrot():
             f.write(b"ROT")
 
         sel = [w for w in folders if w.day]
-        job = plan_archive(sel, arch, "year", move=True, default_algo="xxh128")
+        job = plan_archive(sel, arch, "year", move=True, default_algo="xxh128", workers=WORKERS)
         for g in job.groups:  # force the cross-drive path (sandbox is one filesystem)
             g.fast_rename = False
         res = TransferRunner(job).run()
@@ -292,6 +297,114 @@ def test_sha256_manifest_is_sha256sum_compatible():
         if shutil.which("sha256sum"):
             out = subprocess.run(["sha256sum", "-c", "_mmtx_checksums.sha256"], cwd=folder, capture_output=True, text=True)
             assert out.returncode == 0, out.stdout + out.stderr
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _many_files_card(root, n=240, size=20_000, dup=True):
+    from datetime import datetime as dt
+    d1 = os.path.join(root, "DCIM", "100GOPRO")
+    d2 = os.path.join(root, "DCIM", "101GOPRO")
+    os.makedirs(d1)
+    os.makedirs(d2)
+    ts = dt(2026, 11, 14, 7).timestamp()
+    for i in range(n):
+        p = os.path.join(d1, f"G{i // 100:03d}{i % 100:04d}.JPG")
+        with open(p, "wb") as f:
+            f.write(os.urandom(size))
+        os.utime(p, (ts, ts))
+    if dup:  # same file name in two card folders, different content
+        for d in (d1, d2):
+            p = os.path.join(d, "GOPR0001.JPG")
+            with open(p, "wb") as f:
+                f.write(os.urandom(5000))
+            os.utime(p, (ts, ts))
+
+
+def test_parallel_many_small_files_and_duplicate_names():
+    tmp = tempfile.mkdtemp()
+    try:
+        card = os.path.join(tmp, "card")
+        _many_files_card(card)
+        work = os.path.join(tmp, "work")
+        scan = scan_card(card)
+        job = plan_offload(scan, [(scan.days[0], "2026_11_14_Run")], work, {"gopro": "GoPro"},
+                           OffloadOptions(algo="xxh128", workers=4))
+        events = []
+        r = TransferRunner(job, emit=lambda k, p: events.append((k, p)) if k == "progress" else None)
+        peak = {"n": 0}
+
+        def watch(_partial):
+            with r._lock:
+                peak["n"] = max(peak["n"], len(r.slots))
+            time.sleep(0.002)
+
+        r._after_copy_hook = watch
+        res = r.run()
+        assert res.ok, res.errors
+        assert res.files_copied == 242
+        names = os.listdir(os.path.join(work, "2026_11_14_Run", "GoPro"))
+        assert "GOPR0001.JPG" in names and "GOPR0001_1.JPG" in names
+        entries = _independent_check(os.path.join(work, "2026_11_14_Run"))
+        assert len(entries) == 242
+        last = events[-1][1]
+        assert last["done"] == last["total"] and last["files_done"] == last["files_total"] == 242
+        assert peak["n"] >= 2, "never had two files in flight"
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_parallel_disk_full_aborts_cleanly():
+    import errno as _errno
+
+    tmp, cards, work, _ = _env()
+    try:
+        scan, job, *_ = _offload(cards["gopro"], work, {}, workers=3)
+        r = TransferRunner(job)
+        calls = {"n": 0}
+
+        def boom(partial):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise OSError(_errno.ENOSPC, "No space left on device")
+
+        r._after_copy_hook = boom
+        res = r.run()
+        assert res.aborted.startswith("Destination is full"), res.aborted
+        assert not any(f.endswith(".mmtx-partial") for _, _, fs in os.walk(work) for f in fs)
+        # whatever made it is verified and in the manifest; nothing half-written was kept
+        for g in job.groups:
+            for t in g.tasks:
+                if t.status == "copied":
+                    assert os.path.exists(t.dst)
+                elif t.status in ("failed", "cancelled", "pending"):
+                    assert not os.path.exists(t.dst), t.dst
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_parallel_cancel():
+    tmp = tempfile.mkdtemp()
+    try:
+        card = os.path.join(tmp, "card")
+        _many_files_card(card, n=120, size=400_000, dup=False)
+        work = os.path.join(tmp, "work")
+        scan = scan_card(card)
+        job = plan_offload(scan, [(scan.days[0], "2026_11_14_Run")], work, {"gopro": "GoPro"},
+                           OffloadOptions(algo="xxh128", workers=4))
+        holder = {}
+
+        def emit(kind, p):
+            if kind == "progress" and p["files_done"] >= 10:
+                holder["r"].cancel()
+
+        r = TransferRunner(job, emit=emit)
+        holder["r"] = r
+        res = r.run()
+        assert res.cancelled and 0 < res.files_copied < 120
+        assert not any(f.endswith(".mmtx-partial") for _, _, fs in os.walk(work) for f in fs)
+        entries = _independent_check(os.path.join(work, "2026_11_14_Run"))
+        assert len(entries) == res.files_copied
     finally:
         shutil.rmtree(tmp)
 

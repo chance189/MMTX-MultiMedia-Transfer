@@ -53,6 +53,8 @@ class OffloadOptions:
     rename_gopro: bool = False
     verify_readback: bool = True
     uncached: bool = True
+    workers: int = 1
+    workers_reason: str = ""
 
 
 def _offload_rel(f, device_folders: dict[str, str], opts: OffloadOptions) -> str:
@@ -70,19 +72,19 @@ def offload_files(day: DayGroup, opts: OffloadOptions):
     return [f for f in day.files if not (opts.skip_proxies and f.role in ("proxy", "thumb"))]
 
 
-def day_presence(day: DayGroup, dest_dir: str, device_folders: dict[str, str], opts: OffloadOptions) -> tuple[int, int]:
-    """(files already at destination with matching size, files to transfer)."""
+def day_presence(day: DayGroup, dest_dir: str, device_folders: dict[str, str], opts: OffloadOptions) -> tuple[int, int, set]:
+    """(files already at destination with matching size, files to transfer, set of present source paths)."""
     files = offload_files(day, opts)
-    present = 0
+    present: set[str] = set()
     if os.path.isdir(dest_dir):
         for f in files:
             dst = os.path.join(dest_dir, *_offload_rel(f, device_folders, opts).split("/"))
             try:
                 if os.path.getsize(dst) == f.size:
-                    present += 1
+                    present.add(f.path)
             except OSError:
                 pass
-    return present, len(files)
+    return len(present), len(files), present
 
 
 def plan_offload(
@@ -110,7 +112,8 @@ def plan_offload(
             groups.append(g)
     n = len(groups)
     title = f"Offload {n} day{'s' if n != 1 else ''} from {scan.root}"
-    return Job("offload", title, groups, JobOptions(verify_readback=opts.verify_readback, uncached=opts.uncached))
+    return Job("offload", title, groups, JobOptions(verify_readback=opts.verify_readback, uncached=opts.uncached,
+                                                     workers=opts.workers, workers_reason=opts.workers_reason))
 
 
 # ---------------------------------------------------------------- archive
@@ -157,6 +160,8 @@ def plan_archive(
     default_algo: str,
     verify_readback: bool = True,
     uncached: bool = True,
+    workers: int = 1,
+    workers_reason: str = "",
 ) -> Job:
     groups = []
     anchor = _existing_ancestor(archive_root)
@@ -182,7 +187,8 @@ def plan_archive(
     n = len(groups)
     verb = "Move" if move else "Copy"
     return Job("archive", f"{verb} {n} folder{'s' if n != 1 else ''} to archive {archive_root}", groups,
-               JobOptions(verify_readback=verify_readback, uncached=uncached))
+               JobOptions(verify_readback=verify_readback, uncached=uncached, workers=workers,
+                          workers_reason=workers_reason))
 
 
 def title_from_existing(name: str) -> str:

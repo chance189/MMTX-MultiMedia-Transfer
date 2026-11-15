@@ -1,23 +1,26 @@
-"""Main window: header, tabs, shared progress panel, job orchestration."""
+"""Main window: sidebar + pages + transfer bar, and job orchestration."""
 
 from __future__ import annotations
 
 from typing import Callable, Optional
 
 from PySide6.QtCore import QByteArray, Signal
-from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMessageBox, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
 from .. import APP_NAME
+from ..drives import auto_workers, drive_info
 from ..hashing import ALGORITHMS
 from ..settings import Settings, logs_dir
 from ..transfer import Job, JobResult, TransferRunner, estimate_needed_bytes, free_bytes, human_bytes
 from .archive_tab import ArchiveTab
 from .dialogs import SettingsDialog, SummaryDialog
-from .offload_tab import OffloadTab
+from .offload_tab import OffloadPage
 from .progress_panel import ProgressPanel
+from .sidebar import Sidebar, VolumeWatcher
+from .thumbs import ThumbLoader
 from .verify_tab import VerifyTab
 from .volumes import filesystem_type
-from .widgets import Worker, button, label
+from .widgets import Worker
 
 FAT_LIMIT = 4 * 1024**3 - 1
 
@@ -32,62 +35,95 @@ class MainWindow(QMainWindow):
         self._worker: Optional[Worker] = None
         self._cancel: Optional[Callable[[], None]] = None
         self.setWindowTitle(f"{APP_NAME}  ·  MultiMedia Transfer")
-        self.resize(1280, 860)
-        self.setMinimumSize(1020, 680)
+        self.resize(1440, 900)
+        self.setMinimumSize(1120, 700)
+
+        self.loader = ThumbLoader(self)
+        self.loader.enabled = self.settings.thumbnails
+        self.watcher = VolumeWatcher(self)
 
         central = QWidget()
-        central.setObjectName("Page")
+        central.setObjectName("Root")
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(22, 16, 22, 18)
-        root.setSpacing(10)
+        h = QHBoxLayout(central)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        self.sidebar = Sidebar()
+        h.addWidget(self.sidebar)
 
-        header = QHBoxLayout()
-        header.addWidget(label("MMTX", "Brand"))
-        header.addSpacing(6)
-        header.addWidget(label("MultiMedia Transfer  ·  offload, archive, verify", "BrandSub"))
-        header.addStretch(1)
-        self.badge = label("", "Badge")
-        self.badge.setToolTip("Checksum and verification mode (change in Settings)")
-        header.addWidget(self.badge)
-        header.addWidget(button("Settings", "Ghost", slot=self.open_settings))
-        root.addLayout(header)
-
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.offload = OffloadTab(self)
+        right = QWidget()
+        right.setObjectName("Main")
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(26, 20, 26, 18)
+        rv.setSpacing(14)
+        self.stack = QStackedWidget()
+        self.offload = OffloadPage(self)
         self.archive = ArchiveTab(self)
         self.verify = VerifyTab(self)
-        self.tabs.addTab(self.offload, "Offload card")
-        self.tabs.addTab(self.archive, "Archive")
-        self.tabs.addTab(self.verify, "Verify")
-        root.addWidget(self.tabs, 1)
-
-        self.progress = ProgressPanel()
+        for page in (self.offload, self.archive, self.verify):
+            self.stack.addWidget(page)
+        rv.addWidget(self.stack, 1)
+        self.progress = ProgressPanel(self.loader)
         self.progress.cancel_requested.connect(self.cancel_job)
-        root.addWidget(self.progress)
+        rv.addWidget(self.progress)
+        h.addWidget(right, 1)
 
-        self._update_badge()
+        self.sidebar.page_selected.connect(self.stack.setCurrentIndex)
+        self.sidebar.settings_clicked.connect(self.open_settings)
+        self.sidebar.card_clicked.connect(self._card_clicked)
+        self.watcher.changed.connect(self.sidebar.set_volumes)
+        self.watcher.changed.connect(self.offload.on_volumes)
+        self.watcher.changed.connect(lambda _v: self.update_drives())
+        self.offload.source_changed.connect(self.sidebar.set_active_card)
+        self.offload.dest_changed.connect(lambda _p: self.update_drives())
+
+        self._update_mode()
+        self.update_drives()
         if self.settings.window_geometry:
             try:
                 self.restoreGeometry(QByteArray.fromBase64(self.settings.window_geometry.encode()))
             except Exception:  # noqa: BLE001
                 pass
 
+    # ---------------------------------------------------------------- navigation
+    def show_page(self, idx: int) -> None:
+        self.stack.setCurrentIndex(idx)
+        self.sidebar.select_page(idx)
+
+    def _card_clicked(self, root: str) -> None:
+        self.show_page(0)
+        if not self.busy:
+            self.offload.set_source(root)
+
+    def update_drives(self) -> None:
+        s = self.settings
+        self.sidebar.set_drives(s.offload_dest, s.archive_dest)
+
     # ---------------------------------------------------------------- settings
-    def _update_badge(self) -> None:
+    def _update_mode(self) -> None:
         s = self.settings
         algo = ALGORITHMS.get(s.algo, (s.algo,))[0].split(" (")[0]
         mode = "read-back verify" if s.verify_readback else "size check only"
-        self.badge.setText(f"{algo}  ·  {mode}")
+        par = "auto" if s.workers <= 0 else str(s.workers)
+        self.sidebar.set_mode_text(f"{algo}  ·  {mode}  ·  files at once: {par}")
 
     def open_settings(self) -> None:
         if SettingsDialog(self.settings, self).exec():
-            self._update_badge()
+            self.loader.enabled = self.settings.thumbnails
+            self._update_mode()
             for t in (self.offload, self.archive, self.verify):
                 t.settings_changed()
 
     # ---------------------------------------------------------------- jobs
+    def resolve_workers(self, job: Job, src_root: str, dest_root: str) -> None:
+        if self.settings.workers > 0:
+            n, why = self.settings.workers, "set in Settings"
+        else:
+            src, dst = drive_info(src_root), drive_info(dest_root)
+            n, why = auto_workers(src, dst)
+        job.options.workers = n
+        job.options.workers_reason = why
+
     def preflight(self, job: Job, dest_root: str) -> bool:
         need = estimate_needed_bytes(job)
         free = free_bytes(dest_root)
@@ -109,11 +145,15 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, b: bool) -> None:
         self.busy = b
-        self.tabs.tabBar().setEnabled(not b)
+        if b:
+            self.loader.pause()
+        else:
+            self.loader.resume()
         self.busy_changed.emit(b)
 
-    def run_transfer(self, job: Job, after: Optional[Callable[[JobResult], None]] = None) -> None:
-        self.run_runner(job.title, lambda emit, logs: TransferRunner(job, emit=emit, log_dir=logs), after=after)
+    def run_transfer(self, job: Job, after: Optional[Callable[[JobResult], None]] = None, on_event=None) -> None:
+        self.run_runner(job.title, lambda emit, logs: TransferRunner(job, emit=emit, log_dir=logs),
+                        after=after, on_event=on_event)
 
     def run_runner(self, title: str, factory, after=None, on_event=None) -> None:
         if self.busy:
@@ -163,9 +203,12 @@ class MainWindow(QMainWindow):
         elif res.kind == "checksum":
             detail = f"{res.files_ok} files hashed"
         else:
-            detail = (f"{res.files_ok}/{res.files_total} files verified  ·  {human_bytes(res.bytes_written)} written"
-                      f"  ·  {res.files_failed} failed")
+            detail = (f"{res.files_ok}/{res.files_total} files verified   ·   {human_bytes(res.bytes_written)} written"
+                      f"   ·   {res.files_failed} failed")
+            if res.throughput:
+                detail += f"   ·   {human_bytes(res.throughput)}/s overall"
         self.progress.finish(ok, head, detail)
+        self.update_drives()
         SummaryDialog(res, self).exec()
         if after:
             after(res)
@@ -186,8 +229,12 @@ class MainWindow(QMainWindow):
             self.cancel_job()
             if self._worker:
                 self._worker.wait(15000)
-        self.offload.shutdown()
+        self.watcher.stop()
         self.archive.shutdown()
+        if self.offload.scan_worker and self.offload.scan_worker.isRunning():
+            self.offload.scan_worker.wait(5000)
+        self.loader.clear_queue()
+        self.loader.pool.waitForDone(5000)
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self.settings.save()
         super().closeEvent(e)

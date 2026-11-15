@@ -12,6 +12,7 @@ from typing import Callable, Optional
 
 from . import cameras
 from .manifest import find_manifest, is_manifest
+from .media import media_kind, poster_candidates, thumb_candidates
 from .transfer import is_junk, list_folder_files
 
 SKIP_DIRS = {
@@ -33,6 +34,8 @@ class MediaFile:
     key: str
     capture: datetime
     day: date = None  # type: ignore[assignment]
+    kind: str = "other"  # video | 360 | photo | 360photo | raw | audio | other
+    thumbs: list = field(default_factory=list)  # [(path, method)] cheapest first
 
 
 @dataclass
@@ -137,6 +140,9 @@ def scan_card(
         primary = max(primaries, key=lambda m: m.size)
         for m in members:
             m.day = primary.capture.date()
+            m.kind = media_kind(m.name)
+            if m.role == "media":
+                m.thumbs = thumb_candidates(m.path, [o.path for o in members if o is not m])
 
     days_map: dict[date, DayGroup] = {}
     for f in files:
@@ -203,6 +209,7 @@ class WorkFolder:
     size: int = 0
     manifest_algo: Optional[str] = None
     newest_mtime: float = 0.0
+    poster: list = field(default_factory=list)  # [(path, method)] for the folder thumbnail
 
 
 def _is_system_dir(name: str) -> bool:
@@ -248,6 +255,7 @@ def scan_working(
         if cancel is not None and cancel.is_set():
             break
         files = list_folder_files(wf.path)
+        wf.poster = poster_candidates([p for p, _, _ in files])
         wf.files = len(files)
         wf.size = sum(s for _, _, s in files)
         m = find_manifest(wf.path)

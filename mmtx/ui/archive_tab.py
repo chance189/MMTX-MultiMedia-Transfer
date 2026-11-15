@@ -19,20 +19,58 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QRadioButton,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from PySide6.QtCore import QRectF
+from PySide6.QtGui import QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QStyledItemDelegate
+
 from ..planner import ARCHIVE_LAYOUTS, archive_dest, is_inside, plan_archive
 from ..scanner import WorkFolder, scan_working
 from ..transfer import human_bytes
 from . import theme
-from .widgets import Card, NumItem, PathPicker, Worker, button, label, ro_item
+from .icons import draw_glyph
+from .widgets import Card, NumItem, PathPicker, PillDelegate, Worker, button, label, page_header, ro_item
 
-C_CHECK, C_NAME, C_DATE, C_FILES, C_SIZE, C_SUMS, C_DEST, C_STATUS = range(8)
+C_CHECK, C_THUMB, C_NAME, C_DATE, C_FILES, C_SIZE, C_SUMS, C_DEST, C_STATUS = range(9)
+KEY_ROLE = Qt.UserRole + 7
+
+
+class PosterDelegate(QStyledItemDelegate):
+    def __init__(self, loader, parent=None):
+        super().__init__(parent)
+        self.loader = loader
+
+    def paint(self, p, opt, index):  # noqa: D401
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        r = QRectF(opt.rect).adjusted(4, 5, -4, -5)
+        h = r.height()
+        w = min(r.width(), h * 16 / 9)
+        r = QRectF(r.x(), r.y(), w, h)
+        path = QPainterPath()
+        path.addRoundedRect(r, 6, 6)
+        p.setClipPath(path)
+        key = index.data(KEY_ROLE)
+        pm = self.loader.pixmap(key) if key else None
+        if pm is not None and not pm.isNull():
+            pw, ph = pm.width() / pm.devicePixelRatio(), pm.height() / pm.devicePixelRatio()
+            sc = max(r.width() / pw, r.height() / ph)
+            sw, sh = r.width() / sc, r.height() / sc
+            p.drawPixmap(r, pm, QRectF((pw - sw) / 2, (ph - sh) / 2, sw, sh))
+        else:
+            p.fillRect(r, QColor("#1a2030"))
+            g = h * 0.5
+            draw_glyph(p, "folder", QRectF(r.center().x() - g / 2, r.center().y() - g / 2, g, g), "#3d4659", 1.4)
+        p.setClipping(False)
+        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        p.drawRoundedRect(r, 6, 6)
+        p.restore()
 
 
 class ArchiveTab(QWidget):
@@ -44,10 +82,16 @@ class ArchiveTab(QWidget):
         self.folders: list[WorkFolder] = []
         self.worker: Optional[Worker] = None
         self._updating = False
+        self.loader = host.loader
+        self.key_rows: dict[str, list[int]] = {}
+        self.loader.ready.connect(self._thumb_ready)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 12, 0, 0)
-        root.setSpacing(12)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(14)
+        hrow, _t, self.h_sub = page_header(
+            "Archive", "Move finished day folders from the working drive to the archive drive, verified file by file.")
+        root.addLayout(hrow)
 
         top = QHBoxLayout()
         top.setSpacing(12)
@@ -102,31 +146,38 @@ class ArchiveTab(QWidget):
         f.addWidget(button("None", "Chip", slot=lambda: self._select("none")))
         self.older_btn = button("Older than", "Chip", slot=lambda: self._select("older"))
         f.addWidget(self.older_btn)
-        self.older = QSpinBox()
-        self.older.setRange(0, 3650)
-        self.older.setValue(self.s.older_than_days)
-        self.older.setSuffix(" days")
-        self.older.setButtonSymbols(QSpinBox.NoButtons)
-        self.older.setFixedWidth(90)
-        self.older.valueChanged.connect(self._older_changed)
+        self.older = QComboBox()
+        for d in (3, 7, 14, 30, 60, 90, 180, 365):
+            self.older.addItem(f"{d} days", d)
+        idx = self.older.findData(self.s.older_than_days)
+        if idx < 0:
+            self.older.addItem(f"{self.s.older_than_days} days", self.s.older_than_days)
+            idx = self.older.count() - 1
+        self.older.setCurrentIndex(idx)
+        self.older.currentIndexChanged.connect(lambda _i: self._older_changed(self.older.currentData()))
         f.addWidget(self.older)
         f.addStretch(1)
         f.addWidget(button("Rescan", slot=self.rescan))
         lst.body.addLayout(f)
 
-        self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels(["", "Folder", "Date", "Files", "Size", "Checksums", "Archive location", "Status"])
+        self.table = QTableWidget(0, 9)
+        self.table.setHorizontalHeaderLabels(["", "", "Folder", "Date", "Files", "Size", "Checksums", "Archive location", "Status"])
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setShowGrid(False)
-        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.verticalHeader().setDefaultSectionSize(60)
+        self.table.setItemDelegateForColumn(C_THUMB, PosterDelegate(self.loader, self.table))
+        self.table.setItemDelegateForColumn(C_SUMS, PillDelegate(self.table))
+        self.table.setItemDelegateForColumn(C_STATUS, PillDelegate(self.table))
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Interactive)
         hh.setSectionResizeMode(C_CHECK, QHeaderView.Fixed)
+        hh.setSectionResizeMode(C_THUMB, QHeaderView.Fixed)
         hh.setSectionResizeMode(C_DEST, QHeaderView.Stretch)
-        for c, w in ((C_CHECK, 34), (C_NAME, 250), (C_DATE, 110), (C_FILES, 60), (C_SIZE, 90), (C_SUMS, 150), (C_STATUS, 170)):
+        for c, w in ((C_CHECK, 34), (C_THUMB, 100), (C_NAME, 240), (C_DATE, 100), (C_FILES, 60), (C_SIZE, 90),
+                     (C_SUMS, 150), (C_STATUS, 190)):
             self.table.setColumnWidth(c, w)
         self.table.itemChanged.connect(self._item_changed)
         lst.body.addWidget(self.table, 1)
@@ -146,7 +197,7 @@ class ArchiveTab(QWidget):
         bottom.addWidget(self.mode_move)
         bottom.addWidget(self.mode_copy)
         bottom.addStretch(1)
-        self.go = button("Archive", "Primary", slot=self._start)
+        self.go = button("Archive", "Primary", slot=self._start, icon_name="archive", icon_color="#ffffff")
         self.go.setMinimumWidth(280)
         bottom.addWidget(self.go)
         root.addLayout(bottom)
@@ -186,8 +237,14 @@ class ArchiveTab(QWidget):
         self.worker = w
         w.start()
 
+    def _thumb_ready(self, key: str) -> None:
+        for r in self.key_rows.get(key, ()):
+            if r < self.table.rowCount():
+                self.table.viewport().update(self.table.visualRect(self.table.model().index(r, C_THUMB)))
+
     def _scan_done(self, folders: list[WorkFolder]) -> None:
         self.folders = folders
+        self.key_rows = {}
         self._updating = True
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(folders))
@@ -197,6 +254,13 @@ class ArchiveTab(QWidget):
             chk.setCheckState(Qt.Unchecked)
             chk.setData(Qt.UserRole, r)
             self.table.setItem(r, C_CHECK, chk)
+            th = ro_item("")
+            if wf.poster:
+                key = self.loader.key_for(wf.poster[0][0])
+                th.setData(KEY_ROLE, key)
+                self.key_rows.setdefault(key, []).append(r)
+                self.loader.request(key, wf.poster)
+            self.table.setItem(r, C_THUMB, th)
             self.table.setItem(r, C_NAME, ro_item(wf.name, wf.path))
             d = ro_item(f"{wf.day:%Y-%m-%d}" if wf.day else "undated")
             if not wf.day:
@@ -205,10 +269,10 @@ class ArchiveTab(QWidget):
             self.table.setItem(r, C_FILES, NumItem(str(wf.files), wf.files))
             self.table.setItem(r, C_SIZE, NumItem(human_bytes(wf.size), wf.size))
             if wf.manifest_algo:
-                s = ro_item(f"✓ {wf.manifest_algo}", "Checksums recorded at offload. Every file is checked against them.")
+                s = ro_item(f"✓  {wf.manifest_algo}", "Checksums recorded at offload. Every file is checked against them.")
                 s.setForeground(QColor(theme.SUCCESS))
             else:
-                s = ro_item("none, hashed now", "No manifest yet. Files are hashed during the copy and a manifest is written to the archive.")
+                s = ro_item("hashed during copy", "No manifest yet. Files are hashed during the copy and a manifest is written to the archive.")
                 s.setForeground(QColor(theme.MUTED))
             self.table.setItem(r, C_SUMS, s)
             self.table.setItem(r, C_DEST, ro_item(""))
@@ -266,7 +330,7 @@ class ArchiveTab(QWidget):
         self._update_go()
 
     def _select(self, mode: str) -> None:
-        cutoff = date.fromtimestamp(time.time() - self.older.value() * 86400)
+        cutoff = date.fromtimestamp(time.time() - int(self.older.currentData()) * 86400)
         self._updating = True
         for r, wf in enumerate(self.folders):
             if self.table.isRowHidden(r):
@@ -305,11 +369,13 @@ class ArchiveTab(QWidget):
     def _src_changed(self, p: str) -> None:
         self.s.archive_source = p
         self.s.save()
+        self.host.update_drives()
         self.rescan()
 
     def _dst_changed(self, p: str) -> None:
         self.s.archive_dest = p
         self.s.save()
+        self.host.update_drives()
         self._refresh_dest()
 
     def _layout_changed(self) -> None:
@@ -357,4 +423,5 @@ class ArchiveTab(QWidget):
                 return
         if not self.host.preflight(job, arch):
             return
+        self.host.resolve_workers(job, self.src.path(), arch)
         self.host.run_transfer(job, after=lambda _r: self.rescan())

@@ -23,6 +23,15 @@ def logs_dir() -> str:
     return os.path.join(config_dir(), "logs")
 
 
+def cache_dir() -> str:
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "MMTX", "cache")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Caches/MMTX")
+    return os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "mmtx")
+
+
 @dataclass
 class Settings:
     algo: str = field(default_factory=default_algorithm)
@@ -31,6 +40,8 @@ class Settings:
     spaces_to_underscores: bool = True
     keep_structure: bool = False
     rename_gopro: bool = False
+    workers: int = 0  # files at once; 0 = auto by drive type
+    thumbnails: bool = True
     # offload
     offload_dest: str = ""
     default_title: str = "DailyRun"

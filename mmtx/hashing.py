@@ -182,8 +182,18 @@ def _iter_windows_unbuffered(path: str, chunk: int) -> Iterator[memoryview]:
         CloseHandle(handle)
 
 
+def _chunk_for(path: str, chunk: int) -> int:
+    """Don't allocate an 8 MiB buffer to read a 60 KB thumbnail. Stays a multiple of 4096."""
+    try:
+        size = os.path.getsize(long_path(path))
+    except OSError:
+        return chunk
+    return min(chunk, ((size + 4096) // 4096 + 1) * 4096)
+
+
 def iter_file(path: str, uncached: bool = True, chunk: int = CHUNK) -> Iterator[memoryview]:
     """Yield the file's bytes, bypassing the OS cache when asked and possible."""
+    chunk = _chunk_for(path, chunk)
     if uncached and sys.platform == "win32":
         try:
             gen = _iter_windows_unbuffered(path, chunk)

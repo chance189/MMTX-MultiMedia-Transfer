@@ -10,8 +10,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QApplication
 
-BG = "#0f1115"
-SURFACE = "#171a21"
+BG = "#0e1014"
+SURFACE = "#151820"
 SURFACE2 = "#1d2129"
 BORDER = "#2a2f3a"
 TEXT = "#e7e9ee"
@@ -101,6 +101,56 @@ QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
 QScrollBar::handle:horizontal {{ background: #2e3442; border-radius: 4px; min-width: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+
+/* ---------- layout shell ---------- */
+QWidget#Root, QWidget#Main {{ background: {BG}; }}
+QFrame#Sidebar {{ background: #0a0c10; border-right: 1px solid #1a1e27; }}
+QFrame#Sidebar QLabel {{ background: transparent; }}
+QPushButton#Logo {{ background: transparent; border: none; padding: 0; }}
+QLabel#Brand {{ color: {TEXT}; font-size: 15pt; font-weight: 800; letter-spacing: 1px; }}
+QLabel#BrandSub {{ color: {MUTED}; font-size: 8.5pt; }}
+QLabel#SideCaps {{ color: #5f6880; font-size: 8pt; font-weight: 800; letter-spacing: 1.2px; padding: 0 4px; }}
+QLabel#SideHint {{ color: #5f6880; font-size: 8.5pt; padding: 2px 4px; }}
+QPushButton#Nav {{ background: transparent; border: none; border-radius: 9px; padding: 9px 12px; text-align: left;
+                   color: #aab2c3; font-size: 10.5pt; font-weight: 600; }}
+QPushButton#Nav:hover {{ background: #141821; color: {TEXT}; }}
+QPushButton#Nav:checked {{ background: #18213a; color: #ffffff; }}
+QFrame#CardTile, QFrame#DriveTile {{ background: #11141b; border: 1px solid #1d2230; border-radius: 11px; }}
+QFrame#CardTile:hover, QFrame#DriveTile:hover {{ border-color: #2c3448; }}
+QFrame#CardTile[active="true"] {{ border: 1px solid {ACCENT}; background: #141b2c; }}
+QLabel#TileTitle {{ color: {TEXT}; font-weight: 700; font-size: 9.5pt; }}
+QLabel#TileSub {{ color: {MUTED}; font-size: 8.3pt; }}
+QLabel#TileCaps {{ color: #5f6880; font-size: 7.6pt; font-weight: 800; letter-spacing: 1px; }}
+QLabel#TileKind {{ color: #8fb0ff; font-size: 7.8pt; font-weight: 700; }}
+QProgressBar#Cap {{ min-height: 5px; max-height: 5px; border-radius: 2px; background: #1c212c; }}
+QProgressBar#Cap::chunk {{ border-radius: 2px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ACCENT}, stop:1 #3ec6c0); }}
+QProgressBar#Cap[state="bad"]::chunk {{ background: {DANGER}; }}
+
+/* ---------- pages ---------- */
+QLabel#PageTitle {{ font-size: 19pt; font-weight: 800; color: {TEXT}; }}
+QLabel#EmptyTitle {{ font-size: 15pt; font-weight: 800; color: {TEXT}; }}
+QScrollArea#Days {{ background: transparent; border: none; }}
+QWidget#DaysInner {{ background: transparent; }}
+QFrame#Empty {{ background: transparent; border: 1px dashed #252b38; border-radius: 16px; }}
+QFrame#Empty QLabel {{ background: transparent; }}
+QFrame#DayCard {{ background: {SURFACE}; border: 1px solid #20242e; border-radius: 14px; }}
+QFrame#DayCard:hover {{ border-color: #2a3142; }}
+QFrame#DayCard[selected="true"] {{ border-color: #2f4473; background: #151a26; }}
+QFrame#DayCard QLabel, QFrame#DayCard QCheckBox {{ background: transparent; }}
+QLineEdit#TitleEdit {{ font-size: 11.5pt; font-weight: 700; background: #0f1219; border: 1px solid #262c39; padding: 5px 10px; }}
+QLineEdit#TitleEdit:focus {{ border-color: {ACCENT}; }}
+QLabel#Arrow {{ color: #4d566b; font-size: 12pt; }}
+QLabel#Folder {{ color: #9fb6ff; font-family: "Cascadia Mono", "Consolas", "Menlo", "DejaVu Sans Mono", monospace; font-size: 9.5pt; }}
+QListWidget#ClipGrid {{ background: transparent; border: none; }}
+QLabel#Pill {{ border-radius: 11px; padding: 4px 12px; font-size: 8.8pt; font-weight: 700; }}
+QLabel#Pill[tone="info"] {{ background: rgba(79,179,217,0.13); color: {INFO}; }}
+QLabel#Pill[tone="ok"] {{ background: rgba(52,195,143,0.14); color: {SUCCESS}; }}
+QLabel#Pill[tone="warn"] {{ background: rgba(240,166,58,0.14); color: {WARN}; }}
+QLabel#Pill[tone="bad"] {{ background: rgba(240,82,90,0.14); color: {DANGER}; }}
+QLabel#Pill[tone="muted"] {{ background: rgba(138,147,166,0.12); color: {MUTED}; }}
+QLabel#MoreBadge {{ background: rgba(91,140,255,0.14); color: #9fb6ff; border-radius: 9px; padding: 2px 10px;
+                    font-size: 8.5pt; font-weight: 700; }}
+QFrame#Transfer {{ background: #12151c; border: 1px solid #20242e; border-radius: 14px; }}
 
 QToolTip {{ background: #222733; color: {TEXT}; border: 1px solid #343b4b; padding: 6px; border-radius: 6px; }}
 QMessageBox {{ background: {BG}; }}

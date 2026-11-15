@@ -24,7 +24,9 @@ import shutil
 import stat
 import threading
 import time
+import traceback
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
@@ -41,6 +43,7 @@ from .hashing import (
 from .manifest import is_manifest, load_folder_manifest, write_manifest
 
 PARTIAL_SUFFIX = ".mmtx-partial"
+SMALL_FILE = 2 * CHUNK  # copied in one go, no reader thread
 JUNK_FILES = {".ds_store", "thumbs.db", "desktop.ini", "ehthumbs.db"}
 
 
@@ -102,6 +105,8 @@ class JobOptions:
     verify_readback: bool = True
     uncached: bool = True
     retries: int = 1
+    workers: int = 1  # files in flight at once
+    workers_reason: str = ""
 
 
 @dataclass
@@ -142,6 +147,12 @@ class JobResult:
     groups: list[Group] = field(default_factory=list)
     log_path: str = ""
     dest_dirs: list[str] = field(default_factory=list)
+    # speed breakdown (per-file stream rates; wall-clock throughput)
+    workers: int = 1
+    copy_bytes: int = 0
+    copy_secs: float = 0.0
+    verify_bytes: int = 0
+    verify_secs: float = 0.0
     # verify-specific
     verified_ok: int = 0
     mismatched: int = 0
@@ -156,6 +167,20 @@ class JobResult:
     @property
     def duration(self) -> float:
         return max(0.0, self.finished - self.started)
+
+    @property
+    def copy_rate(self) -> float:
+        return self.copy_bytes / self.copy_secs if self.copy_secs > 0 else 0.0
+
+    @property
+    def verify_rate(self) -> float:
+        return self.verify_bytes / self.verify_secs if self.verify_secs > 0 else 0.0
+
+    @property
+    def throughput(self) -> float:
+        """Data moved per wall-clock second, verification included."""
+        moved = self.copy_bytes or self.bytes_written
+        return moved / self.duration if self.duration > 0 else 0.0
 
 
 # ----------------------------------------------------------------------------
@@ -259,24 +284,28 @@ def _remove(path: str) -> None:
 
 
 # ----------------------------------------------------------------------------
-# Runner base: progress, speed, logging, cancel
+# Runner base: progress (multi-file aware), speed, logging, cancel
 # ----------------------------------------------------------------------------
 
 EmitFn = Callable[[str, dict], None]
 
 
 class RunnerBase:
+    """Progress is tracked per worker thread ("slot"), so several files can be in flight."""
+
     def __init__(self, emit: Optional[EmitFn] = None, log_dir: Optional[str] = None):
         self.emit = emit or (lambda kind, payload: None)
-        self.cancel_event = threading.Event()
+        self.cancel_event = threading.Event()  # user pressed Cancel
+        self.abort_event = threading.Event()  # internal stop (disk full, card pulled)
+        self._lock = threading.RLock()
+        self._tl = threading.local()
+        self.slots: dict[int, dict] = {}
+        self._slot_seq = 0
         self.total = 0
         self.done = 0
         self.files_total = 0
         self.files_done = 0
         self.phase = ""
-        self.cur_name = ""
-        self.cur_total = 0
-        self.cur_done = 0
         self._last_emit = 0.0
         self._samples: deque = deque()
         self.mult = 1  # bytes processed per byte of data (2 = copy + read-back)
@@ -297,34 +326,55 @@ class RunnerBase:
     def cancel(self) -> None:
         self.cancel_event.set()
 
+    def _stopping(self) -> bool:
+        return self.cancel_event.is_set() or self.abort_event.is_set()
+
     # -- logging --
     def log(self, level: str, msg: str) -> None:
         line = f"{datetime.now().strftime('%H:%M:%S')} [{level.upper():5}] {msg}"
-        if self._log_fh:
-            try:
-                self._log_fh.write(line + "\n")
-                self._log_fh.flush()
-            except OSError:
-                pass
+        with self._lock:
+            if self._log_fh:
+                try:
+                    self._log_fh.write(line + "\n")
+                    self._log_fh.flush()
+                except OSError:
+                    pass
         self.emit("log", {"level": level, "msg": msg, "line": line})
 
     def close_log(self) -> None:
-        if self._log_fh:
-            try:
-                self._log_fh.close()
-            except OSError:
-                pass
-            self._log_fh = None
+        with self._lock:
+            if self._log_fh:
+                try:
+                    self._log_fh.close()
+                except OSError:
+                    pass
+                self._log_fh = None
 
     # -- progress --
-    def set_file(self, phase: str, name: str, total: int) -> None:
-        self.phase, self.cur_name, self.cur_total, self.cur_done = phase, name, total, 0
-        self._emit_progress(force=True)
+    def set_file(self, phase: str, name: str, total: int, src: str = "") -> None:
+        tid = threading.get_ident()
+        with self._lock:
+            slot = self.slots.get(tid)
+            if slot is None:
+                self._slot_seq += 1
+                slot = {"seq": self._slot_seq}
+                self.slots[tid] = slot
+            slot.update(phase=phase, name=name, src=src or slot.get("src", ""), file_done=0, file_total=total)
+        self._emit_progress(force=total >= 32 * 1024 * 1024)
+
+    def clear_file(self) -> None:
+        with self._lock:
+            self.slots.pop(threading.get_ident(), None)
 
     def tick(self, n: int) -> None:
-        self.done = min(self.total, self.done + n) if self.total else self.done + n
-        self.cur_done += n
-        if self.cancel_event.is_set():
+        with self._lock:
+            self.done = min(self.total, self.done + n) if self.total else self.done + n
+            slot = self.slots.get(threading.get_ident())
+            if slot is not None:
+                slot["file_done"] += n
+        if getattr(self._tl, "spent", None) is not None:
+            self._tl.spent += n
+        if self._stopping():
             raise Cancelled()
         self._emit_progress()
 
@@ -337,18 +387,21 @@ class RunnerBase:
 
     def _emit_progress(self, force: bool = False) -> None:
         now = time.monotonic()
-        if not force and now - self._last_emit < 0.1:
-            return
-        self._last_emit = now
-        speed = self._speed(now)
-        remaining = max(0, self.total - self.done)
-        self.emit(
-            "progress",
-            {
-                "phase": self.phase,
-                "name": self.cur_name,
-                "file_done": self.cur_done,
-                "file_total": self.cur_total,
+        with self._lock:
+            if not force and now - self._last_emit < 0.1:
+                return
+            self._last_emit = now
+            speed = self._speed(now)
+            remaining = max(0, self.total - self.done)
+            active = [dict(s) for s in sorted(self.slots.values(), key=lambda s: s["seq"])]
+            primary = next((s for s in active if s.get("phase") == "Copying"), active[0] if active else None)
+            payload = {
+                "phase": primary["phase"] if primary else self.phase,
+                "name": primary["name"] if primary else "",
+                "src": primary.get("src", "") if primary else "",
+                "file_done": primary["file_done"] if primary else 0,
+                "file_total": primary["file_total"] if primary else 0,
+                "active": active,
                 "done": self.done,
                 "total": self.total,
                 "data_done": self.done // self.mult,
@@ -357,8 +410,13 @@ class RunnerBase:
                 "files_total": self.files_total,
                 "speed": speed,
                 "eta": remaining / speed if speed > 1 else -1,
-            },
-        )
+            }
+        self.emit("progress", payload)
+
+    def finish_progress(self) -> None:
+        with self._lock:
+            self.slots.clear()
+        self._emit_progress(force=True)
 
 
 # ----------------------------------------------------------------------------
@@ -371,13 +429,79 @@ class TransferRunner(RunnerBase):
         super().__init__(emit, log_dir)
         self.job = job
         self.opt = job.options
+        self.workers = max(1, int(self.opt.workers or 1))
         self.mult = 2 if self.opt.verify_readback else 1
-        self.result = JobResult(kind=job.kind, title=job.title)
+        self.result = JobResult(kind=job.kind, title=job.title, workers=self.workers)
+        self._claimed: set[str] = set()
+        self._made_dirs: set[str] = set()
+        self.abort_exc: Optional[BaseException] = None
         # test hook: called with the partial path after copy, before verify
         self._after_copy_hook: Optional[Callable[[str], None]] = None
 
+    # ---- output-name reservation (several workers may target the same name) ----
+    @staticmethod
+    def _key(p: str) -> str:
+        return os.path.normcase(os.path.abspath(p))
+
+    def _claim_exact(self, path: str) -> bool:
+        with self._lock:
+            k = self._key(path)
+            if k in self._claimed:
+                return False
+            self._claimed.add(k)
+            return True
+
+    def _claim_unique(self, path: str) -> str:
+        base, ext = os.path.splitext(path)
+        with self._lock:
+            i = 1
+            while True:
+                cand = f"{base}_{i}{ext}"
+                if (self._key(cand) not in self._claimed and not os.path.exists(lp(cand))
+                        and not os.path.exists(lp(cand + PARTIAL_SUFFIX))):
+                    self._claimed.add(self._key(cand))
+                    return cand
+                i += 1
+
+    def _ensure_dir(self, d: str) -> None:
+        if d in self._made_dirs:
+            return
+        os.makedirs(lp(d), exist_ok=True)
+        with self._lock:
+            self._made_dirs.add(d)
+
+    def _stat_add(self, kind: str, nbytes: int, secs: float) -> None:
+        with self._lock:
+            self.result.__dict__[f"{kind}_bytes"] += nbytes
+            self.result.__dict__[f"{kind}_secs"] += secs
+
     # ---- copy with inline source hashing ----
-    def _copy_hash(self, src: str, dst: str, algo: str) -> str:
+    def _copy_small(self, src: str, dst: str, algo: str) -> str:
+        """Files up to a couple of chunks: one read, one write, no helper thread."""
+        h = new_hasher(algo)
+        with open(lp(src), "rb", buffering=0) as f:
+            data = f.read()
+        h.update(data)
+        fd = os.open(lp(dst), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o666)
+        with os.fdopen(fd, "wb", buffering=0) as out:
+            if self.opt.uncached:
+                set_nocache_fd(out.fileno())
+            mv = memoryview(data)
+            while mv:
+                n = out.write(mv)
+                mv = mv[n:]
+            out.flush()
+            os.fsync(out.fileno())
+            if self.opt.uncached:
+                drop_cache_fd(out.fileno())
+        with self._lock:
+            self.result.bytes_written += len(data)
+        self.tick(len(data))
+        return h.hexdigest()
+
+    def _copy_hash(self, src: str, dst: str, algo: str, size: int = -1) -> str:
+        if 0 <= size <= SMALL_FILE:
+            return self._copy_small(src, dst, algo)
         h = new_hasher(algo)
         q: queue.Queue = queue.Queue(maxsize=4)
         stop = threading.Event()
@@ -412,7 +536,8 @@ class TransferRunner(RunnerBase):
                     while mv:
                         n = out.write(mv)
                         mv = mv[n:]
-                    self.result.bytes_written += len(b)
+                    with self._lock:
+                        self.result.bytes_written += len(b)
                     self.tick(len(b))
                 out.flush()
                 os.fsync(out.fileno())
@@ -430,20 +555,28 @@ class TransferRunner(RunnerBase):
             raise errs[0]
         return h.hexdigest()
 
-    # ---- one file ----
+    # ---- one file (runs on a worker thread) ----
     def _process(self, g: Group, t: FileTask) -> None:
+        if self._stopping():
+            t.status = "cancelled"
+            return
         budget = t.size * self.mult
-        start = self.done
+        self._tl.spent = 0
         partial = ""
         try:
             st = os.stat(lp(t.src))
             t.size = st.st_size
+            budget = t.size * self.mult
             final = t.dst
-            os.makedirs(lp(os.path.dirname(final)), exist_ok=True)
+            self._ensure_dir(os.path.dirname(final))
 
-            if os.path.exists(lp(final)):
+            if not self._claim_exact(final):
+                # two files in this job map to the same name (e.g. 100GOPRO/ and 101GOPRO/)
+                final = self._claim_unique(final)
+                self.log("warn", f"Two source files share the name {t.rel}; saving one as {os.path.basename(final)}")
+            elif os.path.exists(lp(final)):
                 if os.path.getsize(lp(final)) == t.size:
-                    self.set_file("Checking existing", os.path.basename(final), t.size * 2)
+                    self.set_file("Checking existing", os.path.basename(final), t.size * 2, t.src)
                     sh = hash_file(t.src, g.algo, uncached=False, on_bytes=self.tick, cancel=self.cancel_event)
                     dh = hash_file(final, g.algo, uncached=self.opt.uncached, on_bytes=self.tick, cancel=self.cancel_event)
                     if sh == dh:
@@ -452,24 +585,29 @@ class TransferRunner(RunnerBase):
                         self.log("info", f"Skip  {t.rel}  (already there, {g.algo} match)")
                         self._check_expected(g, t)
                         return
-                final = unique_path(final)
+                final = self._claim_unique(final)
+                self.log("warn", f"Name conflict: different file already at destination, saving as {os.path.basename(final)}")
+            if final != t.dst:
                 t.dst = final
                 t.rel = posixpath.join(posixpath.dirname(t.rel), os.path.basename(final))
-                self.log("warn", f"Name conflict: different file already at destination, saving as {t.rel}")
 
             src_hash = dst_hash = ""
             for attempt in range(1 + self.opt.retries):
                 partial = final + PARTIAL_SUFFIX
                 if os.path.exists(lp(partial)):
                     os.remove(lp(partial))
-                self.set_file("Copying", os.path.basename(final), t.size)
-                src_hash = self._copy_hash(t.src, partial, g.algo)
+                self.set_file("Copying", os.path.basename(final), t.size, t.src)
+                t0 = time.monotonic()
+                src_hash = self._copy_hash(t.src, partial, g.algo, t.size)
+                self._stat_add("copy", t.size, time.monotonic() - t0)
                 _copy_times(t.src, partial)
                 if self._after_copy_hook:
                     self._after_copy_hook(partial)
                 if self.opt.verify_readback:
-                    self.set_file("Verifying", os.path.basename(final), t.size)
+                    self.set_file("Verifying", os.path.basename(final), t.size, t.src)
+                    t0 = time.monotonic()
                     dst_hash = hash_file(partial, g.algo, uncached=self.opt.uncached, on_bytes=self.tick, cancel=self.cancel_event)
+                    self._stat_add("verify", t.size, time.monotonic() - t0)
                 else:
                     dst_hash = src_hash if os.path.getsize(lp(partial)) == t.size else "size-mismatch"
                 if dst_hash == src_hash:
@@ -483,7 +621,6 @@ class TransferRunner(RunnerBase):
                 self.result.errors.append(f"{g.name}/{t.rel}: checksum mismatch after retry")
                 return
 
-            # source changed while we were reading it?
             st2 = os.stat(lp(t.src))
             if st2.st_size != st.st_size or st2.st_mtime_ns != st.st_mtime_ns:
                 os.remove(lp(partial))
@@ -515,11 +652,13 @@ class TransferRunner(RunnerBase):
                     os.remove(lp(partial))
                 except OSError:
                     pass
-            # keep the overall bar honest regardless of how this file ended
-            spent = self.done - start
-            if spent < budget:
-                self.done = min(self.total, self.done + (budget - spent))
-            self.files_done += 1
+            spent = self._tl.spent or 0
+            self._tl.spent = None
+            with self._lock:
+                if spent < budget:
+                    self.done = min(self.total, self.done + (budget - spent))
+                self.files_done += 1
+            self.clear_file()
 
     def _check_expected(self, g: Group, t: FileTask) -> None:
         if not t.src_rel or not g.source_manifest:
@@ -532,9 +671,39 @@ class TransferRunner(RunnerBase):
                 f"{g.name}/{t.rel}: source no longer matches the checksum recorded at offload "
                 f"(recorded {exp}, now {t.hash}). Source kept."
             )
-            g.notes.append(msg)
-            self.result.warnings.append(msg)
+            with self._lock:
+                g.notes.append(msg)
+                self.result.warnings.append(msg)
             self.log("warn", msg)
+
+    def _emit_file(self, g: Group, t: FileTask) -> None:
+        self.emit("file", {"group": g.name, "rel": t.rel, "status": t.status, "src": t.src})
+
+    # ---- all files of one group ----
+    def _run_tasks(self, g: Group) -> None:
+        if self.workers == 1:
+            for t in g.tasks:
+                if self._stopping():
+                    raise Cancelled()
+                self._process(g, t)
+                self._emit_file(g, t)
+            return
+        ex = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="mmtx-copy")
+        try:
+            futures = {ex.submit(self._process, g, t): t for t in g.tasks}
+            for fut in as_completed(futures):
+                t = futures[fut]
+                exc = fut.exception()
+                if exc is not None and not isinstance(exc, Cancelled) and self.abort_exc is None:
+                    self.abort_exc = exc
+                    self.abort_event.set()  # other workers stop at their next chunk
+                self._emit_file(g, t)
+        finally:
+            ex.shutdown(wait=True, cancel_futures=True)
+        if self.abort_exc is not None:
+            raise self.abort_exc
+        if self.cancel_event.is_set():
+            raise Cancelled()
 
     # ---- group-level ----
     def _fast_rename(self, g: Group) -> None:
@@ -544,8 +713,10 @@ class TransferRunner(RunnerBase):
         os.rename(lp(g.source_dir), lp(g.dest_dir))
         for t in g.tasks:
             t.status = "moved"
-        self.done = min(self.total, self.done + g.size * self.mult)
-        self.files_done += len(g.tasks)
+        with self._lock:
+            self.done = min(self.total, self.done + g.size * self.mult)
+            self.files_done += len(g.tasks)
+        self.clear_file()
         g.source_deleted = True
         g.status = "moved"
         self.log("info", f"Moved folder (same drive, instant): {g.source_dir} -> {g.dest_dir}")
@@ -621,7 +792,8 @@ class TransferRunner(RunnerBase):
         self.files_total = self.job.total_files
         self.log("info", f"{self.job.kind.upper()} started: {self.job.title}")
         self.log("info", f"{r.files_total} files, {human_bytes(r.bytes_total)}, verify="
-                 f"{'read-back' if self.opt.verify_readback else 'size only'}, cache bypass={self.opt.uncached}")
+                 f"{'read-back' if self.opt.verify_readback else 'size only'}, cache bypass={self.opt.uncached}, "
+                 f"files at once={self.workers}" + (f" ({self.opt.workers_reason})" if self.opt.workers_reason else ""))
         current: Optional[Group] = None
         try:
             for g in self.job.groups:
@@ -640,26 +812,26 @@ class TransferRunner(RunnerBase):
                         self.emit("group", {"name": g.name, "state": g.status})
                         continue
                     except OSError as e:
+                        self.clear_file()
                         self.log("warn", f"Fast move failed ({e}); falling back to copy + verify")
                         g.fast_rename = False
                 current = g
-                for t in g.tasks:
-                    if self.cancel_event.is_set():
-                        raise Cancelled()
-                    self._process(g, t)
-                    self.emit("file", {"group": g.name, "rel": t.rel, "status": t.status})
+                self._run_tasks(g)
                 self._finalize_group(g, cancelled=False)
                 self.emit("group", {"name": g.name, "state": g.status})
                 current = None
         except Cancelled:
             r.cancelled = True
-            self.log("warn", "Cancelled by user. Completed files are verified and kept; partial file removed.")
+            self.log("warn", "Cancelled by user. Completed files are verified and kept; partial files removed.")
         except DiskFull as e:
             r.aborted = f"Destination is full: {e}"
             self.log("error", r.aborted)
         except SourceGone as e:
             r.aborted = f"Source disappeared (card or drive removed?): {e}"
             self.log("error", r.aborted)
+        except Exception as e:  # noqa: BLE001 - never leave the UI hanging on a bug
+            r.aborted = f"Unexpected error: {e!r}"
+            self.log("error", r.aborted + "\n" + traceback.format_exc())
         finally:
             if current is not None and not current.fast_rename:
                 self._finalize_group(current, cancelled=True)
@@ -679,12 +851,18 @@ class TransferRunner(RunnerBase):
             if r.ok:
                 self.done = self.total
             self.phase = "Done" if r.ok else ("Cancelled" if r.cancelled else "Finished with problems")
-            self._emit_progress(force=True)
+            self.finish_progress()
+            rates = []
+            if r.copy_secs > 0:
+                rates.append(f"copy {human_bytes(r.copy_rate)}/s per file")
+            if r.verify_secs > 0:
+                rates.append(f"read-back {human_bytes(r.verify_rate)}/s per file")
             self.log(
                 "info",
                 f"Finished: {r.files_ok}/{r.files_total} files OK ({r.files_copied} copied, "
                 f"{r.files_skipped} already there, {r.files_moved} moved), {r.files_failed} failed, "
-                f"{human_bytes(r.bytes_written)} written in {human_duration(r.duration)}",
+                f"{human_bytes(r.bytes_written)} written in {human_duration(r.duration)}"
+                + (f" ({human_bytes(r.throughput)}/s overall; {', '.join(rates)}; {self.workers} at once)" if rates else ""),
             )
             r.log_path = self.log_path
             self.close_log()
@@ -809,7 +987,7 @@ class VerifyRunner(RunnerBase):
             if r.ok:
                 self.done = self.total
             self.phase = "Done" if r.ok else ("Cancelled" if r.cancelled else "Problems found")
-            self._emit_progress(force=True)
+            self.finish_progress()
             r.log_path = self.log_path
             self.close_log()
         return r
@@ -866,7 +1044,7 @@ class ChecksumRunner(RunnerBase):
             if r.ok:
                 self.done = self.total
             self.phase = "Done" if r.ok else "Cancelled"
-            self._emit_progress(force=True)
+            self.finish_progress()
             r.log_path = self.log_path
             self.close_log()
         return r

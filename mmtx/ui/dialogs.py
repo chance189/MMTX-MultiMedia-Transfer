@@ -11,15 +11,19 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QPlainTextEdit,
+    QScrollArea,
     QTableWidget,
     QVBoxLayout,
+    QWidget,
 )
 
 from ..hashing import ALGORITHMS, available_algorithms
+from ..media import find_ffmpeg
 from ..settings import Settings, logs_dir
 from ..transfer import JobResult, human_bytes, human_duration
 from . import theme
@@ -169,15 +173,23 @@ class SummaryDialog(QDialog):
             ]
         if res.kind == "checksum":
             return [("Files hashed", str(res.files_ok)), ("Manifests", str(res.manifests)), ("Time", dur)]
-        speed = res.bytes_written / res.duration if res.duration > 0 else 0
-        return [
+        stats = [
             ("Copied + verified", str(res.files_copied)),
             ("Already there", str(res.files_skipped)),
             ("Failed", str(res.files_failed)),
             ("Data written", human_bytes(res.bytes_written)),
             ("Time", dur),
-            ("Avg speed", f"{human_bytes(speed)}/s" if speed else "n/a") if not res.files_moved else ("Moved (instant)", str(res.files_moved)),
-        ] + ([("Checksum", res.algo)] if res.algo else [])
+            ("Overall speed", f"{human_bytes(res.throughput)}/s" if res.throughput else "n/a")
+            if not res.files_moved else ("Moved (instant)", str(res.files_moved)),
+        ]
+        if res.copy_secs > 0:
+            stats.append(("Copy, per file", f"{human_bytes(res.copy_rate)}/s"))
+        if res.verify_secs > 0:
+            stats.append(("Read-back, per file", f"{human_bytes(res.verify_rate)}/s"))
+        stats.append(("Files at once", str(res.workers)))
+        if res.algo:
+            stats.append(("Checksum", res.algo))
+        return stats
 
 
 class SettingsDialog(QDialog):
@@ -185,9 +197,19 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.s = s
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(700)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 18, 20, 16)
+        self.setMinimumWidth(720)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 14)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        body = QWidget()
+        body.setObjectName("Page")
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(20, 18, 20, 6)
         lay.setSpacing(12)
 
         v = Card("Verification")
@@ -208,6 +230,23 @@ class SettingsDialog(QDialog):
         v.body.addWidget(label("Folders that already have a manifest keep its algorithm, so old checksums stay comparable.", "Hint", wrap=True))
         lay.addWidget(v)
 
+        sp = Card("Speed")
+        r3 = QHBoxLayout()
+        r3.addWidget(label("Files at once"))
+        self.workers = QComboBox()
+        self.workers.addItem("Auto  (by drive type, recommended)", 0)
+        for n_ in (1, 2, 3, 4):
+            self.workers.addItem(f"{n_}" + ("  (one at a time)" if n_ == 1 else ""), n_)
+        self.workers.setCurrentIndex(max(0, self.workers.findData(s.workers)))
+        r3.addWidget(self.workers, 1)
+        sp.body.addLayout(r3)
+        sp.body.addWidget(label(
+            "Auto copies one file at a time to hard drives (parallel writes make them seek and fragment files) and "
+            "2-3 at once between flash drives, where one file's read-back overlaps the next copy. "
+            "The summary after each transfer shows copy vs read-back speed so you can see what limits it.",
+            "Hint", wrap=True))
+        lay.addWidget(sp)
+
         n = Card("Naming")
         self.spaces = QCheckBox("Replace spaces in titles with underscores  (Morning Run → Morning_Run)")
         self.spaces.setChecked(s.spaces_to_underscores)
@@ -220,6 +259,17 @@ class SettingsDialog(QDialog):
             n.body.addWidget(w)
         lay.addWidget(n)
 
+        th = Card("Thumbnails")
+        self.thumbs = QCheckBox("Show clip thumbnails  (paused automatically while a transfer runs)")
+        self.thumbs.setChecked(s.thumbnails)
+        th.body.addWidget(self.thumbs)
+        ff = find_ffmpeg()
+        th.body.addWidget(label(
+            f"Video frames via ffmpeg: {ff}" if ff else
+            "ffmpeg not found: video tiles use camera thumbnails (Sony, GoPro .THM) or a placeholder. "
+            "pip install imageio-ffmpeg adds it.", "Hint", wrap=True))
+        lay.addWidget(th)
+
         lg = Card("Logs")
         r2 = QHBoxLayout()
         r2.addWidget(label(logs_dir(), "Muted"), 1)
@@ -230,7 +280,11 @@ class SettingsDialog(QDialog):
         bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         bb.accepted.connect(self._save)
         bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
+        brow = QHBoxLayout()
+        brow.setContentsMargins(20, 0, 20, 0)
+        brow.addWidget(bb)
+        outer.addLayout(brow)
+        self.resize(760, min(820, body.sizeHint().height() + 70))
 
     def _save(self) -> None:
         self.s.algo = self.algo.currentData()
@@ -239,5 +293,7 @@ class SettingsDialog(QDialog):
         self.s.spaces_to_underscores = self.spaces.isChecked()
         self.s.keep_structure = self.keep.isChecked()
         self.s.rename_gopro = self.gopro.isChecked()
+        self.s.workers = int(self.workers.currentData())
+        self.s.thumbnails = self.thumbs.isChecked()
         self.s.save()
         self.accept()

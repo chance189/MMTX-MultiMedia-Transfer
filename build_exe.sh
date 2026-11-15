@@ -6,5 +6,5 @@ cd "$(dirname "$0")"
 .venv/bin/python -m pip install -r requirements.txt pyinstaller
 .venv/bin/python -m PyInstaller --noconfirm --clean --windowed --name MMTX \
     --icon assets/mmtx.png --add-data "assets:assets" \
-    --exclude-module tkinter --collect-submodules mmtx launcher.py
+    --exclude-module tkinter --collect-submodules mmtx --collect-all imageio_ffmpeg launcher.py
 echo "Built: dist/MMTX/"
