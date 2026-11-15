@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mmtx"
+version = "1.0.0"
+description = "MMTX MultiMedia Transfer: offload camera cards by date, archive by folder, verify everything with checksums"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PySide6>=6.6", "xxhash>=3.4"]
+
+[project.gui-scripts]
+mmtx = "mmtx.app:main"
+
+[tool.setuptools.packages.find]
+include = ["mmtx*"]
