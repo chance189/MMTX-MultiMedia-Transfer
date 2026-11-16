@@ -395,6 +395,26 @@ class ArchiveTab(QWidget):
     def settings_changed(self) -> None:
         self._update_go()
 
+    def sync_from_settings(self) -> None:
+        """Easy mode edits the same settings; pick up its choices when switching back."""
+        src = self.s.archive_source or self.s.offload_dest
+        if self.src.path() != src:
+            self.src.set_path(src, emit=False)
+            self.folders = []
+            self.table.setRowCount(0)
+        if self.dst.path() != self.s.archive_dest:
+            self.dst.set_path(self.s.archive_dest, emit=False)
+            if self.folders:
+                self._refresh_dest()
+        i = self.older.findData(self.s.older_than_days)
+        if i >= 0 and i != self.older.currentIndex():
+            self.older.blockSignals(True)
+            self.older.setCurrentIndex(i)
+            self.older.blockSignals(False)
+        if self.isVisible():
+            self.rescan()
+        self._update_go()
+
     # ================================================================ go
     def _start(self) -> None:
         sel = self.selected()

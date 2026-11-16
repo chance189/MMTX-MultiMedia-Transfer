@@ -59,6 +59,10 @@ class Settings:
     verify_path: str = ""
     verify_recursive: bool = True
     window_geometry: str = ""
+    # easy mode
+    easy_mode: bool = False
+    easy_tour_done: bool = False
+    easy_tab: int = 0
 
     @classmethod
     def load(cls) -> "Settings":

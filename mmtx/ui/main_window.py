@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PySide6.QtCore import QByteArray, Signal
+from PySide6.QtCore import QByteArray, QTimer, Signal
 from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
 from .. import APP_NAME
@@ -14,6 +14,8 @@ from ..settings import Settings, logs_dir
 from ..transfer import Job, JobResult, TransferRunner, estimate_needed_bytes, free_bytes, human_bytes
 from .archive_tab import ArchiveTab
 from .dialogs import SettingsDialog, SummaryDialog
+from .easy import EasyPage
+from .easy_widgets import EasyDialog
 from .offload_tab import OffloadPage
 from .progress_panel import ProgressPanel
 from .sidebar import Sidebar, VolumeWatcher
@@ -42,9 +44,11 @@ class MainWindow(QMainWindow):
         self.loader.enabled = self.settings.thumbnails
         self.watcher = VolumeWatcher(self)
 
+        self.modes = QStackedWidget()
+        self.setCentralWidget(self.modes)
         central = QWidget()
         central.setObjectName("Root")
-        self.setCentralWidget(central)
+        self.modes.addWidget(central)
         h = QHBoxLayout(central)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(0)
@@ -68,22 +72,51 @@ class MainWindow(QMainWindow):
         rv.addWidget(self.progress)
         h.addWidget(right, 1)
 
+        self.easy = EasyPage(self)
+        self.modes.addWidget(self.easy)
+
         self.sidebar.page_selected.connect(self.stack.setCurrentIndex)
         self.sidebar.settings_clicked.connect(self.open_settings)
         self.sidebar.card_clicked.connect(self._card_clicked)
-        self.watcher.changed.connect(self.sidebar.set_volumes)
-        self.watcher.changed.connect(self.offload.on_volumes)
-        self.watcher.changed.connect(lambda _v: self.update_drives())
+        self.sidebar.easy_clicked.connect(lambda: self.set_easy(True))
+        self.watcher.changed.connect(self._route_volumes)
         self.offload.source_changed.connect(self.sidebar.set_active_card)
         self.offload.dest_changed.connect(lambda _p: self.update_drives())
 
         self._update_mode()
         self.update_drives()
+        if self.settings.easy_mode:
+            self.set_easy(True)
         if self.settings.window_geometry:
             try:
                 self.restoreGeometry(QByteArray.fromBase64(self.settings.window_geometry.encode()))
             except Exception:  # noqa: BLE001
                 pass
+
+    # ---------------------------------------------------------------- easy / advanced
+    @property
+    def is_easy(self) -> bool:
+        return self.modes.currentWidget() is self.easy
+
+    def set_easy(self, on: bool) -> None:
+        self.modes.setCurrentWidget(self.easy if on else self.modes.widget(0))
+        self.settings.easy_mode = on
+        self.settings.save()
+        # whichever view is showing reacts to cards; give it the current picture right away
+        self._route_volumes(self.watcher.volumes)
+        if on:
+            self.easy.refresh()
+            if not self.settings.easy_tour_done:
+                QTimer.singleShot(400, self.easy.start_tour)
+        else:
+            self.offload.sync_from_settings()
+            self.archive.sync_from_settings()
+            self.update_drives()
+
+    def _route_volumes(self, vols: list) -> None:
+        self.sidebar.set_volumes(vols)
+        (self.easy if self.is_easy else self.offload).on_volumes(vols)
+        self.update_drives()
 
     # ---------------------------------------------------------------- navigation
     def show_page(self, idx: int) -> None:
@@ -124,22 +157,33 @@ class MainWindow(QMainWindow):
         job.options.workers = n
         job.options.workers_reason = why
 
-    def preflight(self, job: Job, dest_root: str) -> bool:
+    def preflight(self, job: Job, dest_root: str, easy: bool = False) -> bool:
         need = estimate_needed_bytes(job)
         free = free_bytes(dest_root)
         if free >= 0 and need > free:
-            QMessageBox.critical(
-                self, "Not enough space",
-                f"This needs {human_bytes(need)} but {dest_root} only has {human_bytes(free)} free.")
+            if easy:
+                EasyDialog(self, "bad", "Not enough room on that drive",
+                           f"This needs <b>{human_bytes(need)}</b> but the drive only has "
+                           f"<b>{human_bytes(free)}</b> free.<br><br>Free up some space or choose a bigger drive.",
+                           ["OK"]).ask()
+            else:
+                QMessageBox.critical(
+                    self, "Not enough space",
+                    f"This needs {human_bytes(need)} but {dest_root} only has {human_bytes(free)} free.")
             return False
         fs = filesystem_type(dest_root)
         if fs in ("vfat", "fat", "fat32", "msdos", "fat16"):
             big = [t for g in job.groups for t in g.tasks if t.size > FAT_LIMIT]
             if big:
-                QMessageBox.critical(
-                    self, "Destination is FAT32",
-                    f"{len(big)} file(s) are larger than 4 GB, which FAT32 cannot store "
-                    f"(e.g. {big[0].rel}). Use an exFAT or NTFS drive.")
+                if easy:
+                    EasyDialog(self, "bad", "That drive can't hold big video files",
+                               "It's formatted as FAT32, which can't store files over 4 GB. "
+                               "Choose a different drive (exFAT or NTFS).", ["OK"]).ask()
+                else:
+                    QMessageBox.critical(
+                        self, "Destination is FAT32",
+                        f"{len(big)} file(s) are larger than 4 GB, which FAT32 cannot store "
+                        f"(e.g. {big[0].rel}). Use an exFAT or NTFS drive.")
                 return False
         return True
 
@@ -151,11 +195,12 @@ class MainWindow(QMainWindow):
             self.loader.resume()
         self.busy_changed.emit(b)
 
-    def run_transfer(self, job: Job, after: Optional[Callable[[JobResult], None]] = None, on_event=None) -> None:
+    def run_transfer(self, job: Job, after: Optional[Callable[[JobResult], None]] = None, on_event=None,
+                     show_summary: bool = True) -> None:
         self.run_runner(job.title, lambda emit, logs: TransferRunner(job, emit=emit, log_dir=logs),
-                        after=after, on_event=on_event)
+                        after=after, on_event=on_event, show_summary=show_summary)
 
-    def run_runner(self, title: str, factory, after=None, on_event=None) -> None:
+    def run_runner(self, title: str, factory, after=None, on_event=None, show_summary: bool = True) -> None:
         if self.busy:
             return
         holder: dict = {}
@@ -176,7 +221,7 @@ class MainWindow(QMainWindow):
         w.bridge.event.connect(self.progress.on_event)
         if on_event:
             w.bridge.event.connect(on_event)
-        w.bridge.finished.connect(lambda res: self._done(res, after))
+        w.bridge.finished.connect(lambda res: self._done(res, after, show_summary))
         w.bridge.failed.connect(self._crashed)
         self._worker = w
         self._cancel = cancel
@@ -189,7 +234,7 @@ class MainWindow(QMainWindow):
             self.progress.cancelling()
             self._cancel()
 
-    def _done(self, res: JobResult, after) -> None:
+    def _done(self, res: JobResult, after, show_summary: bool = True) -> None:
         self._set_busy(False)
         self._cancel = None
         if res.cancelled:
@@ -209,7 +254,8 @@ class MainWindow(QMainWindow):
                 detail += f"   ·   {human_bytes(res.throughput)}/s overall"
         self.progress.finish(ok, head, detail)
         self.update_drives()
-        SummaryDialog(res, self).exec()
+        if show_summary:
+            SummaryDialog(res, self).exec()
         if after:
             after(res)
 
@@ -231,6 +277,9 @@ class MainWindow(QMainWindow):
                 self._worker.wait(15000)
         self.watcher.stop()
         self.archive.shutdown()
+        for w in (self.easy.scan_worker, self.easy.arch_worker):
+            if w is not None and w.isRunning():
+                w.wait(5000)
         if self.offload.scan_worker and self.offload.scan_worker.isRunning():
             self.offload.scan_worker.wait(5000)
         self.loader.clear_queue()

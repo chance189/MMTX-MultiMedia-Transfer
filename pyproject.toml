@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mmtx"
-version = "1.1.0"
+version = "1.2.0"
 description = "MMTX MultiMedia Transfer: offload camera cards by date, archive by folder, verify everything with checksums"
 readme = "README.md"
 requires-python = ">=3.10"

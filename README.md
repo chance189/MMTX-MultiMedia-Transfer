@@ -12,6 +12,23 @@ Inspired by [mmt](https://github.com/konradit/mmt) and [GPTransfer](https://gith
 
 *(Screenshots use generated test clips.)*
 
+## Easy mode
+
+For anyone who just wants their videos saved: big words, one button at a time, and color that tells you what to do. **Yellow** means do this now, **green** means go or done, **red** means stop. Switch with the yellow **Easy mode** button in the sidebar, and back with **Advanced** in the corner. MMTX remembers which one you used last.
+
+| 1. Put the card in | 2. Pick a place (once) | 3. Press GO |
+|---|---|---|
+| ![insert](docs/easy_1_insert.png) | ![place](docs/easy_2_place.png) | ![go](docs/easy_3_ready.png) |
+
+- **Card:** step-by-step "how to put the card in" instructions. The screen changes by itself when the card is found.
+- **Place:** MMTX suggests the drive with the most free space (`D:\MMTX Videos`), so it's one click on **Use this place**. You only do this once.
+- **GO:** shows thumbnails of what's new ("Found 22 new videos!") and one giant green button. A big "Do NOT take the card out yet!" warning and a progress ring stay up until it's done, then a popup says **you can take the card out now**.
+- **Move old videos:** the same three steps for archiving: where the videos are, the backup drive (suggested), GO. Day folders older than 30 days (set in Advanced) are copied, checked and then removed from the working drive.
+- Problems get plain-language popups ("The card came out too early. Put it back in and press GO again.") with the technical details one click away.
+- A first-run walkthrough highlights each part of the screen. **Help** replays it.
+
+Easy mode is deliberately safe: it **never deletes anything from a camera card**, only copies days that aren't saved yet (pressing GO twice is harmless), and always names and sorts the folders itself (`YYYY_MM_DD_<Title>` per day, a folder per year on the backup drive). It uses the same engine, checksums and settings as Advanced, so a folder chosen in one shows up in the other.
+
 ## What it does
 
 | Page | From → To | Grouped by |
@@ -161,6 +178,7 @@ With several files in flight, output names are reserved under a lock, so two car
 python tests/test_engine.py           # offload, resume, corruption, conflicts, cancel, archive, bit rot, verify, parallel
 python tests/test_media.py            # durations, ffmpeg keyframes (H.264 + HEVC), RAW previews
 python tests/gui_smoke.py shots/      # drives the real window headless end to end and saves screenshots
+python tests/gui_easy.py shots/       # same for Easy mode, starting from a fresh install
 python tests/bench.py SRC_DIR DST_DIR # files-at-once benchmark on your own drives
 python tests/make_fake_cards.py out/  # fake GoPro / DJI / Insta360 / FX3 cards to play with
 ```
@@ -181,6 +199,8 @@ mmtx/
   planner.py     scans + choices -> jobs; folder naming; archive layouts
   settings.py    JSON settings in %APPDATA%\MMTX (Windows), ~/.config/mmtx (Linux)
   ui/            sidebar, Offload day cards + clip grid, Archive, Verify, transfer bar, dialogs, theme, icons
+  ui/easy.py     Easy mode: one-screen-at-a-time flows, suggested folders, plain-language popups
+  ui/easy_widgets.py  step tracker, glowing buttons with arrows, progress ring, popups, walkthrough overlay
 ```
 
 ## Acknowledgements

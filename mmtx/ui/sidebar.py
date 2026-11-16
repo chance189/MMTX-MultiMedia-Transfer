@@ -144,6 +144,7 @@ class Sidebar(QFrame):
     page_selected = Signal(int)
     card_clicked = Signal(str)
     settings_clicked = Signal()
+    easy_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -205,6 +206,15 @@ class Sidebar(QFrame):
         self.mode = label("", "SideHint")
         self.mode.setWordWrap(True)
         lay.addWidget(self.mode)
+        eb = QPushButton("  Easy mode")
+        eb.setObjectName("EasySwitch")
+        eb.setIcon(icon("offload", "#0b0d12", 20))
+        eb.setIconSize(QSize(18, 18))
+        eb.setCursor(Qt.PointingHandCursor)
+        eb.setToolTip("Big buttons, three steps, plain language")
+        eb.clicked.connect(self.easy_clicked.emit)
+        lay.addWidget(eb)
+        self.easy_btn = eb
         sb = QPushButton("  Settings")
         sb.setObjectName("Nav")
         sb.setIcon(icon("settings", "#c3cad8", 20))

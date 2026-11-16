@@ -548,6 +548,19 @@ class OffloadPage(QWidget):
             self._rebuild_devices()
             self.refresh_all()
 
+    def sync_from_settings(self) -> None:
+        """Easy mode edits the same settings; pick up its choices when switching back."""
+        if self.dest.path() != self.s.offload_dest:
+            self.dest.set_path(self.s.offload_dest, emit=False)
+            if self.scan:
+                self._populate()
+        if self.default_title.text() != self.s.default_title:
+            self.default_title.blockSignals(True)
+            self.default_title.setText(self.s.default_title)
+            self.default_title.blockSignals(False)
+        self.refresh_all()
+        self._update_go()
+
     def _select(self, mode: str) -> None:
         for sec in self.sections:
             on = mode == "all" or (mode == "new" and not sec.status.text().startswith("✓"))
