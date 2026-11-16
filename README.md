@@ -14,20 +14,42 @@ Inspired by [mmt](https://github.com/konradit/mmt) and [GPTransfer](https://gith
 
 ## Easy mode
 
-For anyone who just wants their videos saved: big words, one button at a time, and color that tells you what to do. **Yellow** means do this now, **green** means go or done, **red** means stop. Switch with the yellow **Easy mode** button in the sidebar, and back with **Advanced** in the corner. MMTX remembers which one you used last.
+For anyone who just wants their videos saved: one step at a time, big type, and exactly one thing to click. Switch with the **Easy mode** button at the bottom of the sidebar, and back with **Advanced** in the corner. MMTX remembers which one you used last.
 
-| 1. Put the card in | 2. Pick a place (once) | 3. Press GO |
+| 1. Insert card | 2. Choose folder (once) | 3. Start |
 |---|---|---|
-| ![insert](docs/easy_1_insert.png) | ![place](docs/easy_2_place.png) | ![go](docs/easy_3_ready.png) |
+| ![insert](docs/easy_1_insert.png) | ![choose](docs/easy_2_choose.png) | ![start](docs/easy_3_ready.png) |
 
-- **Card:** step-by-step "how to put the card in" instructions. The screen changes by itself when the card is found.
-- **Place:** MMTX suggests the drive with the most free space (`D:\MMTX Videos`), so it's one click on **Use this place**. You only do this once.
-- **GO:** shows thumbnails of what's new ("Found 22 new videos!") and one giant green button. A big "Do NOT take the card out yet!" warning and a progress ring stay up until it's done, then a popup says **you can take the card out now**.
-- **Move old videos:** the same three steps for archiving: where the videos are, the backup drive (suggested), GO. Day folders older than 30 days (set in Advanced) are copied, checked and then removed from the working drive.
-- Problems get plain-language popups ("The card came out too early. Put it back in and press GO again.") with the technical details one click away.
-- A first-run walkthrough highlights each part of the screen. **Help** replays it.
+**Colors mean the same thing everywhere:**
 
-Easy mode is deliberately safe: it **never deletes anything from a camera card**, only copies days that aren't saved yet (pressing GO twice is harmless), and always names and sorts the folders itself (`YYYY_MM_DD_<Title>` per day, a folder per year on the backup drive). It uses the same engine, checksums and settings as Advanced, so a folder chosen in one shows up in the other.
+| Color | Meaning |
+|---|---|
+| Red, flashing | The button for the step you still have to do. Press it and it turns green, the tracker ticks the step off, and the next step opens. |
+| Blue, pulsing | Copying right now. A rotating hourglass sits in a progress ring on the clip (and on the big "Now" picture). |
+| Orange, flashing | Almost done (the last 20% of copy + check). |
+| Green | Done: a large check on the clip. Its outline flashes green for 3 seconds, then stays solid. |
+| Grey | Waiting, or not chosen. |
+
+![live](docs/easy_4_running.png)
+
+- **Copy everything or choose which ones.** Step 3 has a big **Copy everything** button and a **Choose which ones** button. Choosing shows every clip on the card by day: tap to add or remove, **All/None** per day, **Only new ones**, and a running count. Clips already on your computer are tagged **Saved**.
+- **Delete from the card, if you want.** In **Choose which ones**, switch on **Delete them from the card after copying**. Each chosen clip is deleted only after its copy checks out, and if anything from a day fails, nothing from that day is deleted. You confirm once before it starts. **Copy everything** never deletes.
+- **Move old videos** works the same way: **Move all** or **Choose which ones** (a list of day folders, older ones pre-chosen), with a switch for removing them from this computer after the check. Folder rows show the same hourglass, orange and green states while they move.
+- **Choose which ones** and the delete switch:
+
+  | Choose | Delete switch |
+  |---|---|
+  | ![pick](docs/easy_pick_2_chosen.png) | ![delete](docs/easy_pick_3_delete.png) |
+
+- **Colors** (top bar) offers four palettes, also in Settings. All of them are neutral, so the five status colors stand out:
+
+  ![palettes](docs/palettes.png)
+
+  **Graphite** (default, neutral charcoal), **Midnight** (navy, no purple), **Daylight** (light background, dark text), **High contrast** (black and white, bold outlines).
+- **Help** answers the real questions: a card that doesn't show up, where videos are saved, when it's safe to remove the card, what "checked" means, pressing Start twice, freeing up space. **Show me around** walks through the screen with Back/Next.
+- Problems get plain-language popups ("The card was removed too early. Put it back in and press Start again.") with the technical details one click away.
+
+**Easy and Advanced are two views of the same session.** The card scan and any running transfer belong to the app, not to a page. Start a copy in Easy mode, switch to Advanced, and the Offload page shows the same clips with live copy/check rings. Start an archive and the Archive page shows each folder as Waiting, Copying 7/13, Checking, Moved. Folders and settings chosen in one show up in the other.
 
 ## What it does
 
@@ -105,21 +127,20 @@ Durations are read straight from the MP4 header. Thumbnails are cached on disk (
 
 ## Folder layout
 
+Files go straight into the day folder. No per-camera subfolders, so paths stay short.
+
 ```
 D:\Footage\  (working drive)                F:\Archive\  (archive drive, "Year folders")
   2026_11_14_DailyRun\                        2026\
-    GoPro_HERO13_Black\                         2026_11_09_DailyRun\
-      GX010001.MP4  GL010001.LRV  ...           2026_11_13_Beach_Sunrise\
-    DJI\                                          GoPro_HERO13_Black\ ...
-      DJI_20261114063012_0002_D.MP4 .LRF .SRT     Beach_Sunrise.prproj   <- edit files come along
-    Insta360_X4\                                  _mmtx_checksums.xxh128
-      VID_20261114_062000_00_001.insv ...
-    Sony_FX3\
-      C0001.MP4  C0001M01.XML  C0001S03.MP4
+    GX010001.MP4                                2026_11_09_DailyRun\
+    GL010001.LRV                                2026_11_13_Beach_Sunrise\
+    DJI_20261114063012_0002_D.MP4                 GX010001.MP4 ...
+    VID_20261114_062000_00_001.insv               Beach_Sunrise.prproj   <- edit files come along
+    C0001.MP4   C0001M01.XML                      _mmtx_checksums.xxh128
     _mmtx_checksums.xxh128
 ```
 
-Camera subfolder names are editable on the Offload page and remembered per camera (rename `DJI` to `Mini4Pro` once and it sticks). Turn off **Camera subfolders** to drop everything flat into the day folder.
+If two cameras ever produce the same file name on the same day, nothing is overwritten: the second one is saved as `name_1.ext`. If you'd rather have a subfolder per camera, switch on **Put each camera in its own subfolder** in Settings.
 
 ## Supported cameras
 
@@ -160,6 +181,8 @@ With several files in flight, output names are reserved under a lock, so two car
 - **Read-back verify:** on by default. Turning it off still records source checksums (for later Verify runs) but only checks the destination size. Roughly halves the time on slow archive drives.
 - **Bypass OS cache on read-back:** on by default.
 - **Files at once:** Auto (by drive type) or 1-4.
+- **Per-camera subfolders:** off by default (files go straight into the day folder).
+- **Easy mode colors:** Graphite, Midnight, Daylight or High contrast (same as the Colors button in Easy mode).
 - **Spaces → underscores** in titles (`Morning Run` → `2026_11_14_Morning_Run`).
 - **Keep card folder structure** (for Sony Catalyst Browse, which wants `PRIVATE/M4ROOT/…`).
 - **Rename GoPro chapters** so they sort together: `GX010123.MP4` → `GX0123_01.MP4`.
@@ -178,7 +201,8 @@ With several files in flight, output names are reserved under a lock, so two car
 python tests/test_engine.py           # offload, resume, corruption, conflicts, cancel, archive, bit rot, verify, parallel
 python tests/test_media.py            # durations, ffmpeg keyframes (H.264 + HEVC), RAW previews
 python tests/gui_smoke.py shots/      # drives the real window headless end to end and saves screenshots
-python tests/gui_easy.py shots/       # same for Easy mode, starting from a fresh install
+python tests/gui_easy.py shots/       # Easy mode from a fresh install: custom selection + delete, switching to
+                                      # Advanced mid-transfer, every palette
 python tests/bench.py SRC_DIR DST_DIR # files-at-once benchmark on your own drives
 python tests/make_fake_cards.py out/  # fake GoPro / DJI / Insta360 / FX3 cards to play with
 ```
@@ -199,8 +223,11 @@ mmtx/
   planner.py     scans + choices -> jobs; folder naming; archive layouts
   settings.py    JSON settings in %APPDATA%\MMTX (Windows), ~/.config/mmtx (Linux)
   ui/            sidebar, Offload day cards + clip grid, Archive, Verify, transfer bar, dialogs, theme, icons
-  ui/easy.py     Easy mode: one-screen-at-a-time flows, suggested folders, plain-language popups
-  ui/easy_widgets.py  step tracker, glowing buttons with arrows, progress ring, popups, walkthrough overlay
+  ui/easy.py     Easy mode: one-step-at-a-time flows, suggested folders, live progress, Help, popups
+  ui/easy_widgets.py  step tracker, illustrations, thumbnail fan, flashing step button, progress ring,
+                 folder rows (live + pick), delete switch, Colors picker, dialogs, Help, walkthrough
+  ui/easy_clips.py    big clip tiles: waiting/copying/almost/done states, hourglass, pick mode
+  ui/palettes.py      Easy palettes and the Easy style sheet
 ```
 
 ## Acknowledgements

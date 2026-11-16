@@ -152,67 +152,11 @@ QLabel#MoreBadge {{ background: rgba(91,140,255,0.14); color: #9fb6ff; border-ra
                     font-size: 8.5pt; font-weight: 700; }}
 QFrame#Transfer {{ background: #12151c; border: 1px solid #20242e; border-radius: 14px; }}
 
-/* ---------- Easy mode: big, high contrast, color = what to do ---------- */
-QWidget#EasyPage {{ background: #0b0d12; }}
-QWidget#EasyPage QLabel {{ background: transparent; }}
-QWidget#EasyHolder, QScrollArea#EasyScroll {{ background: #0b0d12; border: none; }}
-QLabel#EasyBrand {{ color: #ffffff; font-size: 20pt; font-weight: 900; letter-spacing: 1px; }}
-QPushButton#EasyTop {{ background: #1a1f2b; color: #ffffff; border: 2px solid #343c4f; border-radius: 14px;
-                       padding: 10px 20px; font-size: 13pt; font-weight: 700; }}
-QPushButton#EasyTop:hover {{ border-color: #ffffff; }}
-QPushButton#EasyTab {{ background: #141821; color: #e6eaf2; border: 2px solid #343c4f; border-radius: 18px;
-                       padding: 14px 30px; font-size: 16pt; font-weight: 800; }}
-QPushButton#EasyTab:hover {{ border-color: #ffffff; }}
-QPushButton#EasyTab:checked {{ background: #f2f4f8; color: #0b0d12; border-color: #f2f4f8; }}
-QLabel#EasyTitle {{ color: #ffffff; font-size: 30pt; font-weight: 900; }}
-QLabel#EasyTitle[tone="do"] {{ color: #FFD400; }}
-QLabel#EasyTitle[tone="ok"] {{ color: #4ade80; }}
-QLabel#EasyTitle[tone="warn"] {{ color: #FFD400; }}
-QLabel#EasySub {{ color: #e6eaf2; font-size: 17pt; }}
-QLabel#EasyEta {{ color: #ffffff; font-size: 17pt; font-weight: 800; }}
-QLabel#EasyFoot {{ color: #cfd6e4; font-size: 13.5pt; }}
-QLabel#EasyMore {{ color: #ffffff; font-size: 14pt; font-weight: 800; padding: 0 8px; }}
-QFrame#HowTo {{ background: #141821; border: 2px solid #2e3546; border-radius: 18px; }}
-QWidget#EasyPage QLabel#HowNum {{ background: #FFD400; color: #0b0d12; border-radius: 20px; font-size: 17pt; font-weight: 900; }}
-QLabel#HowText {{ color: #ffffff; font-size: 16pt; }}
-QPushButton#EasyPick {{ background: #FFD400; color: #0b0d12; border: none; border-radius: 34px;
-                        padding: 18px 56px; font-size: 22pt; font-weight: 900; min-height: 32px; }}
-QPushButton#EasyPick:hover {{ background: #ffe14d; }}
-QPushButton#EasyGo {{ background: #22C55E; color: #ffffff; border: none; border-radius: 52px;
-                      padding: 22px 120px; font-size: 40pt; font-weight: 900; letter-spacing: 6px; min-height: 60px; }}
-QPushButton#EasyGo:hover {{ background: #34d673; }}
-QPushButton#EasyGo:disabled, QPushButton#EasyPick:disabled {{ background: #262c38; color: #6b7488; }}
-QPushButton#EasyLink {{ background: transparent; border: none; color: #8fb6ff; font-size: 14pt; font-weight: 700;
-                        text-decoration: underline; padding: 6px 10px; }}
-QPushButton#EasyLink:hover {{ color: #ffffff; }}
-QWidget#EasyPage QLabel#EasyWarn {{ background: rgba(239,68,68,0.16); color: #ff6b6b; border: 2px solid #EF4444; border-radius: 16px;
-                   padding: 12px 28px; font-size: 18pt; font-weight: 900; }}
-QPushButton#EasyStop {{ background: transparent; color: #ff6b6b; border: 2px solid #EF4444; border-radius: 16px;
-                        padding: 12px 44px; font-size: 15pt; font-weight: 800; }}
-QPushButton#EasyStop:hover {{ background: rgba(239,68,68,0.15); }}
-QPushButton#EasyStop:disabled {{ color: #6b7488; border-color: #343c4f; }}
-QDialog#EasyDialog {{ background: #0f1219; }}
-QDialog#EasyDialog QLabel {{ background: transparent; }}
-QLabel#EasyDialogTitle {{ color: #ffffff; font-size: 26pt; font-weight: 900; }}
-QLabel#EasyDialogTitle[tone="ok"] {{ color: #4ade80; }}
-QLabel#EasyDialogTitle[tone="bad"] {{ color: #ff6b6b; }}
-QLabel#EasyDialogTitle[tone="warn"] {{ color: #FFD400; }}
-QLabel#EasyDialogText {{ color: #e6eaf2; font-size: 16pt; }}
-QPushButton#EasyDialogYes {{ background: #22C55E; color: #ffffff; border: none; border-radius: 18px;
-                             padding: 14px 32px; font-size: 16pt; font-weight: 900; }}
-QPushButton#EasyDialogYes:hover {{ background: #34d673; }}
-QPushButton#EasyDialogNo {{ background: #1a1f2b; color: #ffffff; border: 2px solid #343c4f; border-radius: 18px;
-                            padding: 12px 30px; font-size: 15pt; font-weight: 700; }}
-QPushButton#EasyDialogNo:hover {{ border-color: #ffffff; }}
-QFrame#Bubble {{ background: #ffffff; border: none; border-radius: 20px; }}
-QFrame#Bubble QLabel {{ background: transparent; }}
-QLabel#BubbleCount {{ color: #5b6478; font-size: 11pt; font-weight: 800; letter-spacing: 1px; }}
-QLabel#BubbleTitle {{ color: #0b0d12; font-size: 20pt; font-weight: 900; }}
-QLabel#BubbleText {{ color: #1f2532; font-size: 15pt; }}
-QFrame#Bubble QPushButton#EasyLink {{ color: #3a5bd9; }}
-QPushButton#EasySwitch {{ background: #FFD400; color: #0b0d12; border: none; border-radius: 10px;
-                          padding: 10px 12px; text-align: left; font-size: 10.5pt; font-weight: 800; }}
-QPushButton#EasySwitch:hover {{ background: #ffe14d; }}
+/* Easy mode styles live in palettes.easy_qss() and are set on the Easy page itself. */
+QPushButton#EasySwitch {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #22c55e, stop:1 #16a34a);
+                          color: #ffffff; border: none; border-radius: 10px; padding: 10px 12px; text-align: left;
+                          font-size: 10.5pt; font-weight: 800; }}
+QPushButton#EasySwitch:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #34d399, stop:1 #22c55e); }}
 
 QToolTip {{ background: #222733; color: {TEXT}; border: 1px solid #343b4b; padding: 6px; border-radius: 6px; }}
 QMessageBox {{ background: {BG}; }}

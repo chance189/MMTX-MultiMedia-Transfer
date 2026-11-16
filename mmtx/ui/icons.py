@@ -89,6 +89,22 @@ def draw_glyph(p: QPainter, name: str, r: QRectF, color: str, width: float = 1.7
         for i, h in enumerate((4, 9, 14, 7, 11, 5)):
             x = 5 + i * 2.8
             path.moveTo(P(x, 12 - h / 2)); path.lineTo(P(x, 12 + h / 2))
+    elif name == "camera":
+        path.addRoundedRect(QRectF(P(2.5, 7), P(21.5, 19.5)), 2.5 * s, 2.5 * s)
+        path.moveTo(P(8, 7)); path.lineTo(P(9.5, 4.5)); path.lineTo(P(14.5, 4.5)); path.lineTo(P(16, 7))
+        path.addEllipse(P(12, 13.2), 3.6 * s, 3.6 * s)
+        path.addEllipse(P(18.2, 9.6), 0.6 * s, 0.6 * s)
+    elif name == "laptop":
+        path.addRoundedRect(QRectF(P(4.5, 4.5), P(19.5, 15.5)), 1.5 * s, 1.5 * s)
+        path.moveTo(P(2, 18.5)); path.lineTo(P(22, 18.5)); path.lineTo(P(20.5, 20)); path.lineTo(P(3.5, 20)); path.closeSubpath()
+    elif name == "search":
+        path.addEllipse(P(10.5, 10.5), 6 * s, 6 * s)
+        path.moveTo(P(15, 15)); path.lineTo(P(20.5, 20.5))
+    elif name == "palette":
+        path.addEllipse(P(12, 12), 8.5 * s, 8.5 * s)
+        for x, y in ((8.3, 10.0), (11.2, 7.4), (15.0, 8.4)):
+            path.addEllipse(P(x, y), 1.3 * s, 1.3 * s)
+        path.addEllipse(P(14.6, 15.0), 2.1 * s, 2.1 * s)
     elif name == "refresh":
         path.arcMoveTo(QRectF(P(4.5, 4.5), P(19.5, 19.5)), 40)
         path.arcTo(QRectF(P(4.5, 4.5), P(19.5, 19.5)), 40, 290)

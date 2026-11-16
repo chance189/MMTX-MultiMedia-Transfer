@@ -45,7 +45,9 @@ class Settings:
     # offload
     offload_dest: str = ""
     default_title: str = "DailyRun"
-    camera_subfolders: bool = True
+    # Off: files go straight into YYYY_MM_DD_<Title>/. (Renamed from camera_subfolders so the old
+    # default of "on" in existing settings files is ignored.)
+    per_camera_subfolders: bool = False
     skip_proxies: bool = False
     delete_from_card: bool = False
     device_aliases: dict = field(default_factory=dict)  # detected label -> folder name
@@ -63,6 +65,7 @@ class Settings:
     easy_mode: bool = False
     easy_tour_done: bool = False
     easy_tab: int = 0
+    easy_palette: str = "graphite"  # graphite | midnight | daylight | contrast
 
     @classmethod
     def load(cls) -> "Settings":

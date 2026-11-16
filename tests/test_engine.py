@@ -68,17 +68,17 @@ def test_offload_all_cameras_and_resume():
         days = sorted(os.listdir(work))
         assert days == ["2026_11_12_Run", "2026_11_13_Beach", "2026_11_14_Daily_Run"], days
         d14 = os.path.join(work, "2026_11_14_Daily_Run")
-        assert sorted(os.listdir(d14)) == sorted(
-            ["DJI", "GoPro_HERO12_Black", "Insta360_X4", "Sony_FX3", "_mmtx_checksums.xxh128"]
-        ), os.listdir(d14)
+        # flat layout: files sit directly in the day folder, no per-camera subfolders
+        assert not any(os.path.isdir(os.path.join(d14, n)) for n in os.listdir(d14)), os.listdir(d14)
+        assert "_mmtx_checksums.xxh128" in os.listdir(d14)
         # midnight-crossing GoPro thumbnail lands with its clip on the 13th
-        assert os.path.exists(os.path.join(work, "2026_11_13_Beach", "GoPro_HERO12_Black", "GX010002.THM"))
+        assert os.path.exists(os.path.join(work, "2026_11_13_Beach", "GX010002.THM"))
         # FX3: XML date beats the wrong file mtime
-        assert os.path.exists(os.path.join(d14, "Sony_FX3", "C0001.MP4"))
-        assert os.path.exists(os.path.join(work, "2026_11_13_Beach", "Sony_FX3", "C0002M01.XML"))
+        assert os.path.exists(os.path.join(d14, "C0001.MP4"))
+        assert os.path.exists(os.path.join(work, "2026_11_13_Beach", "C0002M01.XML"))
         # mtimes preserved
         src = os.path.join(cards["gopro"], "DCIM", "100GOPRO", "GX010003.MP4")
-        dst = os.path.join(d14, "GoPro_HERO12_Black", "GX010003.MP4")
+        dst = os.path.join(d14, "GX010003.MP4")
         assert int(os.path.getmtime(src)) == int(os.path.getmtime(dst))
         entries = _independent_check(d14)
         assert len(entries) == 3 + 4 + 2 + 5  # gopro + dji + insta + sony on the 14th
@@ -133,7 +133,7 @@ def test_corruption_retry_and_hard_fail():
         r._after_copy_hook = flip_always
         res = r.run()
         assert not res.ok and res.files_failed == 1
-        bad = os.path.join(work2, "2026_11_14_Run", "Insta360_X4", "VID_20261114_062000_00_001.insv")
+        bad = os.path.join(work2, "2026_11_14_Run", "VID_20261114_062000_00_001.insv")
         assert not os.path.exists(bad) and not os.path.exists(bad + ".mmtx-partial")
         assert os.path.exists(os.path.join(cards["insta360"], "DCIM", "Camera01", "VID_20261114_062000_00_001.insv"))
         # the other, fully verified day WAS deleted from the card
@@ -197,7 +197,7 @@ def test_archive_move_copy_verify_bitrot():
         assert "random stuff" in names
 
         # bit rot on the working drive since offload
-        rot = os.path.join(work, "2026_11_12_Run", "Insta360_X4", "IMG_20261112_180000_00_002.insp")
+        rot = os.path.join(work, "2026_11_12_Run", "IMG_20261112_180000_00_002.insp")
         with open(rot, "r+b") as f:
             f.seek(5000)
             f.write(b"ROT")
@@ -222,11 +222,11 @@ def test_archive_move_copy_verify_bitrot():
         folders_with_manifest = [os.path.join(arch, "2026", n) for n in os.listdir(os.path.join(arch, "2026"))]
         v = VerifyRunner(folders_with_manifest).run()
         assert v.ok and v.mismatched == 0 and v.verified_ok > 0
-        victim = os.path.join(arch, "2026", "2026_11_14_Daily_Run", "DJI", "DJI_20261114063012_0002_D.MP4")
+        victim = os.path.join(arch, "2026", "2026_11_14_Daily_Run", "DJI_20261114063012_0002_D.MP4")
         with open(victim, "r+b") as f:
             f.seek(1234)
             f.write(b"X")
-        os.remove(os.path.join(arch, "2026", "2026_11_14_Daily_Run", "Sony_FX3", "C0001T01.JPG"))
+        os.remove(os.path.join(arch, "2026", "2026_11_14_Daily_Run", "C0001T01.JPG"))
         v = VerifyRunner(folders_with_manifest).run()
         assert v.mismatched == 1 and v.missing == 1 and not v.ok
 
@@ -343,7 +343,7 @@ def test_parallel_many_small_files_and_duplicate_names():
         res = r.run()
         assert res.ok, res.errors
         assert res.files_copied == 242
-        names = os.listdir(os.path.join(work, "2026_11_14_Run", "GoPro"))
+        names = os.listdir(os.path.join(work, "2026_11_14_Run"))
         assert "GOPR0001.JPG" in names and "GOPR0001_1.JPG" in names
         entries = _independent_check(os.path.join(work, "2026_11_14_Run"))
         assert len(entries) == 242
@@ -405,6 +405,20 @@ def test_parallel_cancel():
         assert not any(f.endswith(".mmtx-partial") for _, _, fs in os.walk(work) for f in fs)
         entries = _independent_check(os.path.join(work, "2026_11_14_Run"))
         assert len(entries) == res.files_copied
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_per_camera_subfolders_opt_in():
+    tmp, cards, work, _ = _env()
+    try:
+        for card in (cards["gopro"], cards["sony"]):
+            _, job, *_ = _offload(card, work, {"2026-11-14": "Run"}, camera_subfolders=True)
+            assert TransferRunner(job).run().ok
+        d14 = os.path.join(work, "2026_11_14_Run")
+        assert sorted(n for n in os.listdir(d14) if os.path.isdir(os.path.join(d14, n))) == \
+            ["GoPro_HERO12_Black", "Sony_FX3"]
+        assert os.path.exists(os.path.join(d14, "Sony_FX3", "C0001.MP4"))
     finally:
         shutil.rmtree(tmp)
 

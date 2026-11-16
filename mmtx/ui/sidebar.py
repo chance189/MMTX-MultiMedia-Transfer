@@ -208,7 +208,7 @@ class Sidebar(QFrame):
         lay.addWidget(self.mode)
         eb = QPushButton("  Easy mode")
         eb.setObjectName("EasySwitch")
-        eb.setIcon(icon("offload", "#0b0d12", 20))
+        eb.setIcon(icon("offload", "#ffffff", 20))
         eb.setIconSize(QSize(18, 18))
         eb.setCursor(Qt.PointingHandCursor)
         eb.setToolTip("Big buttons, three steps, plain language")

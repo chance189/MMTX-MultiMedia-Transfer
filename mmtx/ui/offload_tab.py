@@ -1,4 +1,8 @@
-"""Offload page: camera card -> working drive, one card per shooting day with clip thumbnails."""
+"""Offload page: camera card -> working drive, one card per shooting day with clip thumbnails.
+
+The card scan and the running transfer belong to the main window; this page only renders them,
+so a transfer started in Easy mode shows up here live as well.
+"""
 
 from __future__ import annotations
 
@@ -31,14 +35,33 @@ from ..planner import (
     sanitize,
     title_from_existing,
 )
-from ..scanner import CardScan, DayGroup, scan_card
+from ..scanner import CardScan, DayGroup
 from ..transfer import human_bytes
 from .clip_grid import ROLE, ClipGrid, clip_info
 from .icons import draw_glyph
-from .widgets import Card, CamBadge, DateTile, PathPicker, Worker, button, label, page_header, pill, set_pill
+from .widgets import Card, CamBadge, DateTile, PathPicker, button, label, page_header, pill, set_pill
 
 PHASE_STATUS = {"Copying": "copying", "Verifying": "verifying", "Checking existing": "checking"}
 FINAL_STATUS = {"copied": "copied", "skipped": "skipped", "failed": "failed", "cancelled": "cancelled"}
+
+
+def device_folders(settings, scan: CardScan) -> dict[str, str]:
+    """Camera subfolder names (only used when 'per-camera subfolders' is switched on in Settings)."""
+    sp = settings.spaces_to_underscores
+    return {p: (settings.device_aliases.get(lbl) or sanitize(lbl, sp)) for p, lbl in scan.devices.items()}
+
+
+def offload_options(settings, delete_source: bool) -> OffloadOptions:
+    return OffloadOptions(
+        algo=settings.algo,
+        camera_subfolders=settings.per_camera_subfolders,
+        skip_proxies=settings.skip_proxies,
+        delete_source=delete_source,
+        keep_structure=settings.keep_structure,
+        rename_gopro=settings.rename_gopro,
+        verify_readback=settings.verify_readback,
+        uncached=settings.uncached,
+    )
 
 
 class DaySection(QFrame):
@@ -113,7 +136,6 @@ class DaySection(QFrame):
             loader.request(key, f.thumbs, f.path)
         self._update_more()
 
-    # ---------------------------------------------------------------- state
     def _edited(self, _t: str) -> None:
         self.edited = True
 
@@ -137,20 +159,20 @@ class DaySection(QFrame):
 
     def set_present(self, present: set) -> None:
         for path, it in self.items.items():
-            info = it.data(ROLE)
-            info["present"] = path in present
+            it.data(ROLE)["present"] = path in present
         self.grid.viewport().update()
 
-    def set_all_status(self, status: str) -> None:
-        for it in self.items.values():
-            info = it.data(ROLE)
-            info["status"] = status
-            info["progress"] = 0.0
+    def set_status(self, paths, status: str) -> None:
+        for path in paths:
+            it = self.items.get(path)
+            if it is not None:
+                info = it.data(ROLE)
+                info["status"] = status
+                info["progress"] = 0.0
         self.grid.viewport().update()
 
 
 class OffloadPage(QWidget):
-    source_changed = Signal(str)
     dest_changed = Signal(str)
 
     def __init__(self, host, parent=None):
@@ -160,14 +182,10 @@ class OffloadPage(QWidget):
         self.s = host.settings
         self.loader = host.loader
         self.scan: Optional[CardScan] = None
-        self.scan_worker: Optional[Worker] = None
         self.sections: list[DaySection] = []
         self.src_index: dict = {}
         self.key_index: dict = {}
-        self.device_edits: dict[str, QLineEdit] = {}
-        self._seen_roots: set = set()
-        self._first_volumes = True
-        self._job_deletes = False
+        self._live: dict[str, tuple[str, float]] = {}  # src -> (status, progress) of the running job
         self.loader.ready.connect(self._thumb_ready)
 
         root = QVBoxLayout(self)
@@ -189,8 +207,6 @@ class OffloadPage(QWidget):
         g.setVerticalSpacing(4)
         g.addWidget(label("WORKING DRIVE", "CardTitle"), 0, 0)
         g.addWidget(label("DEFAULT TITLE", "CardTitle"), 0, 1)
-        self.dev_caption = label("CAMERA FOLDER", "CardTitle")
-        g.addWidget(self.dev_caption, 0, 2)
         self.dest = PathPicker("Where daily footage lives, e.g. D:\\Footage", "Choose working folder")
         self.dest.set_path(self.s.offload_dest, emit=False)
         self.dest.changed.connect(self._dest_changed)
@@ -201,16 +217,12 @@ class OffloadPage(QWidget):
         self.default_title.setPlaceholderText("e.g. DailyRun")
         self.default_title.textChanged.connect(self._default_title_changed)
         tcol.addWidget(self.default_title)
-        hint = label("Day folders: YYYY_MM_DD_<Title>", "Hint")
+        hint = label("Files go straight into  YYYY_MM_DD_<Title>", "Hint")
         hint.setTextFormat(Qt.PlainText)
         tcol.addWidget(hint)
         g.addLayout(tcol, 1, 1, Qt.AlignTop)
-        self.dev_box = QVBoxLayout()
-        self.dev_box.setSpacing(4)
-        g.addLayout(self.dev_box, 1, 2, Qt.AlignTop)
         g.setColumnStretch(0, 5)
         g.setColumnStretch(1, 3)
-        g.setColumnStretch(2, 3)
         strip.body.addLayout(g)
         root.addWidget(strip)
 
@@ -249,9 +261,6 @@ class OffloadPage(QWidget):
         # ---------------------------------------------------- options + go
         bottom = QHBoxLayout()
         bottom.setSpacing(18)
-        self.opt_subfolders = QCheckBox("Camera subfolders")
-        self.opt_subfolders.setToolTip("2026_11_14_DailyRun/GoPro_HERO13_Black/… so several cameras on one day stay apart")
-        self.opt_subfolders.setChecked(self.s.camera_subfolders)
         self.opt_proxies = QCheckBox("Skip proxies && thumbnails")
         self.opt_proxies.setToolTip("Leave .LRV, DJI .LRF, .THM and Sony SUB/THMBNL files on the card")
         self.opt_proxies.setChecked(self.s.skip_proxies)
@@ -260,7 +269,7 @@ class OffloadPage(QWidget):
             "Only files whose checksum verified are deleted, and only if the whole day verified.\n"
             "Formatting in camera is still cleanest (Sony cameras keep a clip database).")
         self.opt_delete.setChecked(self.s.delete_from_card)
-        for cb in (self.opt_subfolders, self.opt_proxies, self.opt_delete):
+        for cb in (self.opt_proxies, self.opt_delete):
             cb.toggled.connect(self._options_changed)
             bottom.addWidget(cb)
         bottom.addStretch(1)
@@ -269,7 +278,12 @@ class OffloadPage(QWidget):
         bottom.addWidget(self.go)
         root.addLayout(bottom)
 
-        self.host.busy_changed.connect(lambda _b: self._update_go())
+        host.busy_changed.connect(lambda _b: self._update_go())
+        host.card_scanning.connect(self._card_scanning)
+        host.card_changed.connect(self._card_changed)
+        host.job_started.connect(self._job_started)
+        host.job_event.connect(self._job_event)
+        host.job_finished.connect(self._job_finished)
         self._update_go()
 
     def _build_empty(self) -> QWidget:
@@ -294,8 +308,7 @@ class OffloadPage(QWidget):
                 p.drawRoundedRect(QRectF(0, 0, 96, 96), 26, 26)
                 draw_glyph(p, "card", QRectF(22, 20, 52, 56), "#5b8cff", 1.6)
 
-        art = _Art()
-        lay.addWidget(art, 0, Qt.AlignHCenter)
+        lay.addWidget(_Art(), 0, Qt.AlignHCenter)
         lay.addSpacing(10)
         t = label("Insert a camera card", "EmptyTitle")
         t.setAlignment(Qt.AlignCenter)
@@ -305,73 +318,37 @@ class OffloadPage(QWidget):
         self.empty_sub.setAlignment(Qt.AlignCenter)
         lay.addWidget(self.empty_sub)
         lay.addSpacing(8)
-        b = button("Browse for a folder…", slot=self._browse_source, icon_name="folder")
-        lay.addWidget(b, 0, Qt.AlignHCenter)
+        lay.addWidget(button("Browse for a folder…", slot=self._browse_source, icon_name="folder"), 0, Qt.AlignHCenter)
         lay.addStretch(2)
         return w
 
-    # ================================================================ volumes
-    def on_volumes(self, vols: list) -> None:
-        cams = [v for v in vols if v.camera]
-        roots = {v.root for v in cams}
-        new = [v for v in cams if v.root not in self._seen_roots]
-        first, self._first_volumes = self._first_volumes, False
-        self._seen_roots = roots
-        cur = self.scan.root if self.scan else ""
-        if cur and not os.path.isdir(cur):
-            self._clear_scan("Card removed.")
-            cur = ""
-        if new and not self.host.busy and (first or not cur or cur not in roots):
-            self.set_source(new[0].root)
-
+    # ================================================================ card (owned by the main window)
     def _browse_source(self) -> None:
         start = self.scan.root if self.scan else os.path.expanduser("~")
         p = QFileDialog.getExistingDirectory(self, "Choose card or folder", start)
         if p:
-            self.set_source(os.path.normpath(p))
+            self.host.scan_card(os.path.normpath(p))
 
     def set_source(self, root: str) -> None:
-        self._scan(root)
+        self.host.scan_card(root)
 
     def rescan(self) -> None:
-        if self.scan:
-            self._scan(self.scan.root)
+        self.host.rescan_card()
 
-    # ================================================================ scanning
-    def _scan(self, root: str) -> None:
-        if self.scan_worker and self.scan_worker.isRunning():
-            return
+    def _card_scanning(self, root: str) -> None:
         self.h_sub.setText(f"Scanning {root} …")
-        self.source_changed.emit(root)
-        w = Worker(lambda emit: scan_card(root), self)
-        w.bridge.finished.connect(self._scan_done)
-        w.bridge.failed.connect(lambda tb: self._clear_scan(f"Scan failed: {tb.splitlines()[-1]}"))
-        self.scan_worker = w
-        w.start()
 
-    def _clear_scan(self, msg: str) -> None:
-        self.scan = None
-        self._clear_sections()
-        self.badge.setVisible(False)
-        self.h_title.setText("Offload")
-        self.h_sub.setText(msg)
-        self.stack.setCurrentIndex(0)
-        self._rebuild_devices()
-        self.source_changed.emit("")
-        self._update_go()
-
-    def _clear_sections(self) -> None:
-        self.loader.clear_queue()
-        for sec in self.sections:
-            sec.setParent(None)
-            sec.deleteLater()
-        self.sections = []
-        self.src_index.clear()
-        self.key_index.clear()
-
-    def _scan_done(self, scan: CardScan) -> None:
-        if not scan.files:
-            self._clear_scan(f"No camera media found on {scan.root}.")
+    def _card_changed(self, scan) -> None:
+        if scan is None:
+            msg = {"empty": "No camera media found on that card.", "unreadable": "Couldn't read that card.",
+                   "removed": "Card removed."}.get(self.host.card_note, "Insert a camera card, or Browse to a folder.")
+            self.scan = None
+            self._clear_sections()
+            self.badge.setVisible(False)
+            self.h_title.setText("Offload")
+            self.h_sub.setText(msg)
+            self.stack.setCurrentIndex(0)
+            self._update_go()
             return
         self.scan = scan
         first = next(iter(scan.devices.values()))
@@ -382,72 +359,19 @@ class OffloadPage(QWidget):
         self.h_sub.setText(f"{scan.root}   ·   {len(scan.files)} files   ·   {human_bytes(scan.size)}   ·   "
                            f"{n} shooting day{'s' if n != 1 else ''}")
         self.stack.setCurrentIndex(1)
-        self._rebuild_devices()
         self._populate()
-        self.source_changed.emit(scan.root)
 
-    # ================================================================ device folders
-    def _rebuild_devices(self) -> None:
-        def drop(w):
-            w.hide()
-            w.setParent(None)
-            w.deleteLater()
-
-        while self.dev_box.count():
-            it = self.dev_box.takeAt(0)
-            lay = it.layout()
-            if lay is not None:
-                while lay.count():
-                    w = lay.takeAt(0).widget()
-                    if w:
-                        drop(w)
-                lay.deleteLater()
-            elif it.widget():
-                drop(it.widget())
-        self.device_edits.clear()
-        if not self.scan:
-            self.dev_box.addWidget(label("Set per camera once a card is in", "Hint"))
-            return
-        for prof, detected in self.scan.devices.items():
-            row = QHBoxLayout()
-            row.setSpacing(6)
-            row.addWidget(CamBadge(detected, 26))
-            edit = QLineEdit(self.s.device_aliases.get(detected) or sanitize(detected, self.s.spaces_to_underscores))
-            edit.setToolTip(f"Subfolder for {detected}. Remembered for next time.")
-            edit.editingFinished.connect(lambda d=detected, e=edit: self._alias_changed(d, e))
-            row.addWidget(edit, 1)
-            self.dev_box.addLayout(row)
-            self.device_edits[prof] = edit
-        self._sync_device_visibility()
-
-    def _sync_device_visibility(self) -> None:
-        vis = self.opt_subfolders.isChecked()
-        self.dev_caption.setVisible(vis)
-        for e in self.device_edits.values():
-            e.setEnabled(vis)
-
-    def _alias_changed(self, detected: str, edit: QLineEdit) -> None:
-        val = sanitize(edit.text(), self.s.spaces_to_underscores) or sanitize(detected, self.s.spaces_to_underscores)
-        edit.setText(val)
-        self.s.device_aliases[detected] = val
-        self.s.save()
-        self.refresh_all()
-
-    def device_folders(self) -> dict[str, str]:
-        return {p: (sanitize(e.text(), self.s.spaces_to_underscores) or p) for p, e in self.device_edits.items()}
+    def _clear_sections(self) -> None:
+        for sec in self.sections:
+            sec.setParent(None)
+            sec.deleteLater()
+        self.sections = []
+        self.src_index.clear()
+        self.key_index.clear()
 
     # ================================================================ days
     def _opts(self) -> OffloadOptions:
-        return OffloadOptions(
-            algo=self.s.algo,
-            camera_subfolders=self.opt_subfolders.isChecked(),
-            skip_proxies=self.opt_proxies.isChecked(),
-            delete_source=self.opt_delete.isChecked(),
-            keep_structure=self.s.keep_structure,
-            rename_gopro=self.s.rename_gopro,
-            verify_readback=self.s.verify_readback,
-            uncached=self.s.uncached,
-        )
+        return offload_options(self.s, self.opt_delete.isChecked())
 
     def _populate(self) -> None:
         assert self.scan
@@ -463,6 +387,7 @@ class OffloadPage(QWidget):
                 self.src_index[path] = (sec, it)
                 self.key_index.setdefault(it.data(ROLE)["key"], []).append((sec, it))
         self.refresh_all(set_checks=True)
+        self._apply_live()
 
     def _folder(self, sec: DaySection) -> str:
         return day_folder_name(sec.day.day, sec.title.text(), self.s.spaces_to_underscores)
@@ -471,7 +396,7 @@ class OffloadPage(QWidget):
         if not self.scan:
             return
         opts = self._opts()
-        dev = self.device_folders()
+        dev = device_folders(self.s, self.scan)
         dest = self.dest.path()
         for sec in self.sections:
             folder = self._folder(sec)
@@ -504,8 +429,7 @@ class OffloadPage(QWidget):
     def _section_changed(self) -> None:
         sec = self.sender()
         if isinstance(sec, DaySection) and self.scan:
-            folder = self._folder(sec)
-            if sec.folder.text() != folder:
+            if sec.folder.text() != self._folder(sec):
                 self.refresh_all()
                 return
         self._update_go()
@@ -536,16 +460,13 @@ class OffloadPage(QWidget):
         self._update_go()
 
     def _options_changed(self) -> None:
-        self.s.camera_subfolders = self.opt_subfolders.isChecked()
         self.s.skip_proxies = self.opt_proxies.isChecked()
         self.s.delete_from_card = self.opt_delete.isChecked()
         self.s.save()
-        self._sync_device_visibility()
         self.refresh_all()
 
     def settings_changed(self) -> None:
         if self.scan:
-            self._rebuild_devices()
             self.refresh_all()
 
     def sync_from_settings(self) -> None:
@@ -579,7 +500,7 @@ class OffloadPage(QWidget):
         self.sel_info.setText(f"{n} of {len(self.sections)} days selected" if self.sections else "")
         self.go.setEnabled(bool(n) and bool(self.dest.path()) and not self.host.busy)
 
-    # ================================================================ transfer
+    # ================================================================ start
     def _start(self) -> None:
         if not self.scan:
             return
@@ -592,9 +513,9 @@ class OffloadPage(QWidget):
         except OSError as e:
             QMessageBox.critical(self, "Cannot use destination", f"{dest}\n\n{e}")
             return
-        sel = self.selected()
         opts = self._opts()
-        job = plan_offload(self.scan, [(s.day, self._folder(s)) for s in sel], dest, self.device_folders(), opts)
+        job = plan_offload(self.scan, [(s.day, self._folder(s)) for s in self.selected()], dest,
+                           device_folders(self.s, self.scan), opts)
         if not job.groups:
             return
         if opts.delete_source:
@@ -607,39 +528,51 @@ class OffloadPage(QWidget):
         if not self.host.preflight(job, dest):
             return
         self.host.resolve_workers(job, self.scan.root, dest)
-        self._job_deletes = opts.delete_source
-        for s in sel:
-            s.set_all_status("queued")
-        self.host.run_transfer(job, after=self._after_job, on_event=self.on_job_event)
+        self.host.run_transfer(job)
 
-    def on_job_event(self, kind: str, p: dict) -> None:
-        if kind == "progress":
-            for slot in p.get("active", ()):
-                hit = self.src_index.get(slot.get("src", ""))
-                if not hit:
-                    continue
-                sec, it = hit
-                info = it.data(ROLE)
-                info["status"] = PHASE_STATUS.get(slot.get("phase", ""), "copying")
-                tot = slot.get("file_total") or 0
-                info["progress"] = slot.get("file_done", 0) / tot if tot else 0.0
-                sec.grid.refresh(it)
-        elif kind == "file":
-            hit = self.src_index.get(p.get("src", ""))
+    # ================================================================ live state (any transfer, either mode)
+    def _job_started(self, job) -> None:
+        if job.kind != "offload":
+            return
+        self._live = {t.src: ("queued", 0.0) for g in job.groups for t in g.tasks}
+        self._apply_live()
+
+    def _apply_live(self) -> None:
+        if not self._live:
+            return
+        touched = set()
+        for src, (status, prog) in self._live.items():
+            hit = self.src_index.get(src)
             if hit:
                 sec, it = hit
                 info = it.data(ROLE)
-                info["status"] = FINAL_STATUS.get(p.get("status", ""), "")
-                info["progress"] = 1.0
-                sec.grid.refresh(it)
+                info["status"], info["progress"] = status, prog
+                touched.add(sec)
+        for sec in touched:
+            sec.grid.viewport().update()
 
-    def _after_job(self, _result) -> None:
-        if not self.scan:
+    def _set_live(self, src: str, status: str, prog: float) -> None:
+        if src not in self._live:
             return
-        if self._job_deletes or not os.path.isdir(self.scan.root):
-            if os.path.isdir(self.scan.root):
-                self._scan(self.scan.root)
+        self._live[src] = (status, prog)
+        hit = self.src_index.get(src)
+        if hit:
+            sec, it = hit
+            info = it.data(ROLE)
+            info["status"], info["progress"] = status, prog
+            sec.grid.refresh(it)
+
+    def _job_event(self, kind: str, p: dict) -> None:
+        if not self._live:
             return
-        for sec in self.sections:
-            sec.set_all_status("")
-        self.refresh_all(set_checks=True)
+        if kind == "progress":
+            for slot in p.get("active", ()):
+                tot = slot.get("file_total") or 0
+                self._set_live(slot.get("src", ""), PHASE_STATUS.get(slot.get("phase", ""), "copying"),
+                               slot.get("file_done", 0) / tot if tot else 0.0)
+        elif kind == "file":
+            self._set_live(p.get("src", ""), FINAL_STATUS.get(p.get("status", ""), ""), 1.0)
+
+    def _job_finished(self, res) -> None:
+        if res.kind == "offload":
+            self._live = {}  # tiles keep their final marks until the card rescan replaces them

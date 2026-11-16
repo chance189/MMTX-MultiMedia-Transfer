@@ -85,6 +85,11 @@ class ArchiveTab(QWidget):
         self.loader = host.loader
         self.key_rows: dict[str, list[int]] = {}
         self.loader.ready.connect(self._thumb_ready)
+        # live state of the running archive job, keyed by normalized source folder path
+        self._live: dict[str, dict] = {}
+        self._src_to_folder: dict[str, str] = {}
+        self._name_to_folder: dict[str, str] = {}
+        self._job_move = True
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -176,8 +181,8 @@ class ArchiveTab(QWidget):
         hh.setSectionResizeMode(C_CHECK, QHeaderView.Fixed)
         hh.setSectionResizeMode(C_THUMB, QHeaderView.Fixed)
         hh.setSectionResizeMode(C_DEST, QHeaderView.Stretch)
-        for c, w in ((C_CHECK, 34), (C_THUMB, 100), (C_NAME, 240), (C_DATE, 100), (C_FILES, 60), (C_SIZE, 90),
-                     (C_SUMS, 150), (C_STATUS, 190)):
+        for c, w in ((C_CHECK, 34), (C_THUMB, 100), (C_NAME, 210), (C_DATE, 96), (C_FILES, 52), (C_SIZE, 80),
+                     (C_SUMS, 118), (C_STATUS, 160)):
             self.table.setColumnWidth(c, w)
         self.table.itemChanged.connect(self._item_changed)
         lst.body.addWidget(self.table, 1)
@@ -203,6 +208,9 @@ class ArchiveTab(QWidget):
         root.addLayout(bottom)
 
         self.host.busy_changed.connect(lambda _b: self._update_go())
+        host.job_started.connect(self._job_started)
+        host.job_event.connect(self._job_event)
+        host.job_finished.connect(self._job_finished)
         self._update_go()
 
     def shutdown(self) -> None:
@@ -307,6 +315,7 @@ class ArchiveTab(QWidget):
                 st.setText("New")
                 st.setForeground(QColor(theme.INFO))
         self._updating = False
+        self._apply_live()
         self._update_go()
 
     # ================================================================ filter/select
@@ -444,4 +453,88 @@ class ArchiveTab(QWidget):
         if not self.host.preflight(job, arch):
             return
         self.host.resolve_workers(job, self.src.path(), arch)
-        self.host.run_transfer(job, after=lambda _r: self.rescan())
+        self.host.run_transfer(job)
+
+    # ================================================================ live state (any archive job, either mode)
+    @staticmethod
+    def _norm(p: str) -> str:
+        return os.path.normcase(os.path.abspath(p))
+
+    def _job_started(self, job) -> None:
+        if job.kind != "archive":
+            return
+        self._live, self._src_to_folder, self._name_to_folder = {}, {}, {}
+        self._job_move = any(g.delete_source for g in job.groups)
+        for g in job.groups:
+            key = self._norm(g.source_dir or g.source_root)
+            self._live[key] = {"done": 0, "total": len(g.tasks), "state": "waiting", "phase": ""}
+            self._name_to_folder[g.name] = key
+            for t in g.tasks:
+                self._src_to_folder[t.src] = key
+        self._apply_live()
+
+    def _job_event(self, kind: str, p: dict) -> None:
+        if not self._live:
+            return
+        if kind == "progress":
+            for slot in p.get("active", ()):
+                key = self._src_to_folder.get(slot.get("src", ""))
+                if key is None and str(slot.get("phase", "")).startswith("Moving"):
+                    key = self._name_to_folder.get(slot.get("name", ""))
+                if key and self._live[key]["state"] in ("waiting", "copying"):
+                    self._live[key]["state"] = "copying"
+                    self._live[key]["phase"] = slot.get("phase", "")
+        elif kind == "file":
+            key = self._src_to_folder.get(p.get("src", ""))
+            if key:
+                self._live[key]["done"] += 1
+        elif kind == "group":
+            key = self._name_to_folder.get(p.get("name", ""))
+            if key:
+                state = p.get("state", "")
+                self._live[key]["state"] = "copying" if state == "start" else state
+        else:
+            return
+        self._apply_live()
+
+    def _live_text(self, d: dict) -> tuple[str, str]:
+        st = d["state"]
+        if st == "waiting":
+            return "Waiting", theme.MUTED
+        if st == "copying":
+            ph = d.get("phase", "")
+            verb = "Checking" if ph in ("Verifying", "Checking existing") else ("Moving" if ph.startswith("Moving") else "Copying")
+            return f"{verb}  {d['done']}/{d['total']}", theme.ACCENT
+        return {
+            "verified": ("✓  Moved" if self._job_move else "✓  Archived", theme.SUCCESS),
+            "moved": ("✓  Moved", theme.SUCCESS),
+            "warnings": ("!  Kept, needs a look", theme.WARN),
+            "errors": ("✕  Problem", theme.DANGER),
+            "cancelled": ("Stopped", theme.MUTED),
+        }.get(st, (st, theme.MUTED))
+
+    def _apply_live(self) -> None:
+        if not self._live:
+            return
+        self._updating = True
+        for r, wf in enumerate(self.folders):
+            d = self._live.get(self._norm(wf.path))
+            st = self.table.item(r, C_STATUS)
+            name = self.table.item(r, C_NAME)
+            if d is None or st is None or name is None:
+                continue
+            text, color = self._live_text(d)
+            st.setText(text)
+            st.setForeground(QColor(color))
+            f = name.font()
+            f.setBold(d["state"] == "copying")
+            name.setFont(f)
+            name.setForeground(QColor(theme.ACCENT if d["state"] == "copying" else theme.TEXT))
+        self._updating = False
+
+    def _job_finished(self, res) -> None:
+        if res.kind != "archive":
+            return
+        # final marks stay on any folder that is still here (copy mode, problems); moved ones leave the list
+        if self.src.path() and os.path.isdir(self.src.path()):
+            self.rescan()

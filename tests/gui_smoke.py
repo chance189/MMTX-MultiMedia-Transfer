@@ -4,6 +4,7 @@ and saves screenshots. Needs ffmpeg for the demo clips. Usage: python tests/gui_
 
 from __future__ import annotations
 
+import atexit
 import os
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ from datetime import datetime, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 TMP = tempfile.mkdtemp(prefix="mmtx_gui_")
+atexit.register(shutil.rmtree, TMP, True)  # the demo card holds ~1 GB of fake footage
 os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, "config")
 os.environ["XDG_CACHE_HOME"] = os.path.join(TMP, "cache")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -204,6 +206,7 @@ def main() -> int:
     assert res.workers == 2, res.workers
     print(f"offload: {res.files_copied} copied, {res.files_failed} failed, workers={res.workers}, "
           f"copy {res.copy_rate / 1e6:.0f} MB/s, read-back {res.verify_rate / 1e6:.0f} MB/s")
+    wait_until(app, lambda: not w.scanning and w.offload.sections)
     for _ in range(10):
         app.processEvents()
     statuses = [s.status.text() for s in w.offload.sections]
@@ -237,8 +240,8 @@ def main() -> int:
     assert os.path.isdir(os.path.join(work, "2026_11_14_DailyRun"))
 
     # ---- verify (with one rotted file)
-    victim_dir = os.path.join(arch, "2026", "2026_11_10_DailyRun", "GoPro_HERO13_Black")
-    victim = os.path.join(victim_dir, sorted(os.listdir(victim_dir))[0])
+    victim_dir = os.path.join(arch, "2026", "2026_11_10_DailyRun")
+    victim = os.path.join(victim_dir, sorted(n for n in os.listdir(victim_dir) if not n.startswith("_mmtx"))[0])
     with open(victim, "r+b") as f:
         f.seek(777)
         f.write(b"\xde\xad")
@@ -263,7 +266,7 @@ def main() -> int:
 
     # empty state
     w.show_page(0)
-    w.offload._clear_scan("Insert a camera card, or Browse to a folder.")
+    w.clear_card()
     app.processEvents()
     grab(w, "6_empty.png")
     w.close()

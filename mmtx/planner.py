@@ -46,7 +46,7 @@ def existing_day_folders(dest_root: str) -> dict[date, list[str]]:
 @dataclass
 class OffloadOptions:
     algo: str
-    camera_subfolders: bool = True
+    camera_subfolders: bool = False
     skip_proxies: bool = False
     delete_source: bool = False
     keep_structure: bool = False

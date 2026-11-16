@@ -255,7 +255,9 @@ class SettingsDialog(QDialog):
         self.keep.setChecked(s.keep_structure)
         self.gopro = QCheckBox("Rename GoPro chapters so they sort together  (GX010123 → GX0123_01)")
         self.gopro.setChecked(s.rename_gopro)
-        for w in (self.spaces, self.keep, self.gopro):
+        self.subfolders = QCheckBox("Put each camera in its own subfolder  (off: files go straight into the day folder)")
+        self.subfolders.setChecked(s.per_camera_subfolders)
+        for w in (self.spaces, self.keep, self.gopro, self.subfolders):
             n.body.addWidget(w)
         lay.addWidget(n)
 
@@ -269,6 +271,18 @@ class SettingsDialog(QDialog):
             "ffmpeg not found: video tiles use camera thumbnails (Sony, GoPro .THM) or a placeholder. "
             "pip install imageio-ffmpeg adds it.", "Hint", wrap=True))
         lay.addWidget(th)
+
+        from .palettes import PALETTES
+
+        ez = Card("Easy mode colors")
+        self.palette = QComboBox()
+        for k, pal in PALETTES.items():
+            self.palette.addItem(f"{pal.name}   ({pal.blurb})", k)
+        self.palette.setCurrentIndex(max(0, self.palette.findData(s.easy_palette)))
+        ez.body.addWidget(self.palette)
+        ez.body.addWidget(label("Red = still to do, blue = copying, orange = almost done, green = done, "
+                                "grey = waiting. Same meaning in every palette.", "Hint", wrap=True))
+        lay.addWidget(ez)
 
         lg = Card("Logs")
         r2 = QHBoxLayout()
@@ -293,7 +307,9 @@ class SettingsDialog(QDialog):
         self.s.spaces_to_underscores = self.spaces.isChecked()
         self.s.keep_structure = self.keep.isChecked()
         self.s.rename_gopro = self.gopro.isChecked()
+        self.s.per_camera_subfolders = self.subfolders.isChecked()
         self.s.workers = int(self.workers.currentData())
         self.s.thumbnails = self.thumbs.isChecked()
+        self.s.easy_palette = self.palette.currentData()
         self.s.save()
         self.accept()
