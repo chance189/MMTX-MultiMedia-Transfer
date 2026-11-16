@@ -59,6 +59,9 @@ def main() -> int:
     app.setApplicationVersion(__version__)
     apply_theme(app)
     app.setWindowIcon(make_icon())
+    from .sources import install_platform_backend
+
+    install_platform_backend(log=lambda m: print(m, file=sys.stderr))
     w = MainWindow()
     w.show()
     return app.exec()

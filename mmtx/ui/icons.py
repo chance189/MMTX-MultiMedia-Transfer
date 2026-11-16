@@ -13,12 +13,15 @@ CAMERA_STYLES = {
     "dji": ("DJI", "#9aa6bd"),
     "insta360": ("360", "#f2c230"),
     "sony": ("SNY", "#f07b3f"),
-    "generic": ("CAM", "#8b7cf6"),
+    "phone": ("PH", "#34d399"),
+    "generic": ("CAM", "#94a3b8"),
 }
 
 
 def camera_style(label_or_profile: str) -> tuple[str, str]:
     low = (label_or_profile or "").lower()
+    if low.startswith(("phone", "pixel", "apple", "iphone", "samsung", "galaxy")):
+        return CAMERA_STYLES["phone"]
     for key in ("gopro", "dji", "insta360", "sony"):
         if low.startswith(key):
             return CAMERA_STYLES[key]
@@ -100,6 +103,13 @@ def draw_glyph(p: QPainter, name: str, r: QRectF, color: str, width: float = 1.7
     elif name == "search":
         path.addEllipse(P(10.5, 10.5), 6 * s, 6 * s)
         path.moveTo(P(15, 15)); path.lineTo(P(20.5, 20.5))
+    elif name == "usb":  # USB-C plug on a cable
+        path.addRoundedRect(QRectF(P(8, 2.5), P(16, 12)), 2 * s, 2 * s)
+        path.moveTo(P(10.5, 5.5))
+        path.lineTo(P(13.5, 5.5))
+        path.moveTo(P(12, 12))
+        path.lineTo(P(12, 15))
+        path.cubicTo(P(12, 19), P(17, 18), P(17, 21.5))
     elif name == "palette":
         path.addEllipse(P(12, 12), 8.5 * s, 8.5 * s)
         for x, y in ((8.3, 10.0), (11.2, 7.4), (15.0, 8.4)):
@@ -157,4 +167,99 @@ def draw_cross(p: QPainter, center: QPointF, radius: float, fill: str) -> None:
     d = radius * 0.36
     p.drawLine(center + QPointF(-d, -d), center + QPointF(d, d))
     p.drawLine(center + QPointF(-d, d), center + QPointF(d, -d))
+    p.restore()
+
+
+# ---------------------------------------------------------------- device icons
+# Original line drawings of device types (not brand logos): drone, action cam, 360 cam,
+# cinema camera body, phone, memory card. Drawn on a 48-unit grid.
+
+DEVICE_KINDS = ("drone", "action", "360", "cinema", "phone", "card")
+
+
+def draw_device(p: QPainter, kind: str, r: QRectF, color: str, width: float = 2.2, fill_alpha: int = 34) -> None:
+    s = min(r.width(), r.height()) / 48.0
+    ox = r.x() + (r.width() - 48 * s) / 2
+    oy = r.y() + (r.height() - 48 * s) / 2
+
+    def P(x, y):
+        return QPointF(ox + x * s, oy + y * s)
+
+    def R(x1, y1, x2, y2):
+        return QRectF(P(x1, y1), P(x2, y2))
+
+    col = QColor(color)
+    fill = QColor(col)
+    fill.setAlpha(fill_alpha)
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+    pen = _pen(color, max(1.2, width * s * 0.72))
+    p.setPen(pen)
+    p.setBrush(fill)
+    if kind == "drone":
+        for cx, cy in ((10, 11), (38, 11), (10, 37), (38, 37)):
+            p.setBrush(Qt.NoBrush)
+            p.drawLine(P(24 + (cx - 24) * 0.25, 24 + (cy - 24) * 0.25), P(cx, cy))
+            p.setBrush(fill)
+            p.drawEllipse(P(cx, cy), 7 * s, 7 * s)
+            p.setBrush(col)
+            p.drawEllipse(P(cx, cy), 1.6 * s, 1.6 * s)
+        p.setBrush(fill)
+        p.drawRoundedRect(R(17, 17, 31, 31), 4 * s, 4 * s)
+        p.setBrush(col)
+        p.drawEllipse(P(24, 28), 2.2 * s, 2.2 * s)
+    elif kind == "action":
+        p.drawRoundedRect(R(7, 13, 41, 38), 6 * s, 6 * s)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(R(12, 9, 19, 13), 1.2 * s, 1.2 * s)
+        p.setBrush(fill)
+        p.drawEllipse(P(29, 25.5), 8 * s, 8 * s)
+        p.drawEllipse(P(29, 25.5), 3.6 * s, 3.6 * s)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(R(11.5, 18, 19.5, 25), 1.5 * s, 1.5 * s)
+    elif kind == "360":
+        p.drawRoundedRect(R(16, 5, 32, 43), 7 * s, 7 * s)
+        p.drawEllipse(P(24, 14), 6.5 * s, 6.5 * s)
+        p.setBrush(col)
+        p.drawEllipse(P(24, 14), 2.4 * s, 2.4 * s)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(R(19.5, 24, 28.5, 33), 1.5 * s, 1.5 * s)
+        p.setBrush(col)
+        p.drawEllipse(P(24, 38), 1.5 * s, 1.5 * s)
+    elif kind == "cinema":
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(R(19, 8, 29, 12), 1 * s, 1 * s)
+        p.setBrush(fill)
+        p.drawRoundedRect(R(5, 12, 43, 38), 4 * s, 4 * s)
+        p.drawEllipse(P(25, 25), 10 * s, 10 * s)
+        p.drawEllipse(P(25, 25), 5.5 * s, 5.5 * s)
+        p.setBrush(col)
+        p.drawEllipse(P(25, 25), 1.8 * s, 1.8 * s)
+        p.setBrush(Qt.NoBrush)
+        for x in (8.5, 11.5):
+            p.drawLine(P(x, 17), P(x, 33))
+        p.drawEllipse(P(39, 16.5), 1.4 * s, 1.4 * s)
+    elif kind == "phone":
+        p.drawRoundedRect(R(13, 3, 35, 45), 6 * s, 6 * s)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(R(16, 9, 32, 39), 2 * s, 2 * s)
+        p.setBrush(col)
+        p.drawEllipse(P(24, 6), 1.3 * s, 1.3 * s)
+        p.drawLine(P(21, 42), P(27, 42))
+    else:  # memory card
+        path = QPainterPath()
+        path.moveTo(P(14, 5))
+        path.lineTo(P(29, 5))
+        path.lineTo(P(36, 12))
+        path.lineTo(P(36, 41))
+        path.quadTo(P(36, 43), P(34, 43))
+        path.lineTo(P(14, 43))
+        path.quadTo(P(12, 43), P(12, 41))
+        path.lineTo(P(12, 7))
+        path.quadTo(P(12, 5), P(14, 5))
+        p.drawPath(path)
+        p.setBrush(Qt.NoBrush)
+        for x in (17, 21, 25, 29):
+            p.drawLine(P(x, 9), P(x, 15))
+        p.drawRoundedRect(R(16, 26, 32, 38), 1.5 * s, 1.5 * s)
     p.restore()

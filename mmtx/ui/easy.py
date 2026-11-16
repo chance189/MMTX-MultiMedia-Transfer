@@ -11,7 +11,7 @@ The card scan and any running transfer belong to the main window, so this page a
 pages always show the same thing, whichever one started the transfer.
 
 Safety without questions:
-  * Easy mode never deletes anything from a camera card.
+  * Copy everything never deletes from a card or phone; Choose which ones can, after each file checks out.
   * Only days that aren't saved yet are copied, so pressing Start twice is harmless.
   * Old videos leave this computer only after every file checked out on the backup drive.
 """
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -42,6 +43,7 @@ from PySide6.QtWidgets import (
 
 from ..media import poster_candidates
 from ..planner import (
+    merge_offload_jobs,
     day_folder_name,
     day_presence,
     existing_day_folders,
@@ -54,7 +56,9 @@ from ..scanner import DayGroup, scan_working
 from ..settings import logs_dir
 from ..transfer import free_bytes, human_bytes
 from .clip_grid import ROLE, clip_info
+from .. import sources
 from .easy_clips import ALMOST, EasyClipGrid, NowThumb
+from .easy_devices import DeviceChip, DeviceGrid, DeviceSwitcher, GuideView, NameBox, device_guide
 from .easy_widgets import (
     Art,
     Beacon,
@@ -234,6 +238,16 @@ class EasyPage(QWidget):
         self._foot_actions: list = [None, None]
         self._started_here = False
         self._advancing = False  # a step button just turned green; the next step opens shortly
+        self._device_pick = ""  # device whose connection steps are showing on step 1
+        self._shoot_title = self.s.default_title  # "Name this shoot"
+        self._day_titles: dict = {}  # per-day names from Choose which ones
+        self._title_root = None  # titles reset once every card/device has been unplugged
+        self._view_all = True  # several devices connected: show them together (the "All devices" chip)
+        self._pick_scans: list = []
+        self._plans: dict = {}  # root -> plan, for the "All devices" view
+        self._cards_sig = None
+        self._name_focus = True
+        self._existing: dict = {}
         self._job_kind = ""
         self._job_dest = ""
         self._celebrate = False
@@ -248,6 +262,7 @@ class EasyPage(QWidget):
         # custom selection ("Choose which ones")
         self._pick_kind = ""
         self._pick_scan = None
+        self.host.cards_changed.connect(self._cards_changed)
         self._pick_grids: list = []
         set_palette(self.s.easy_palette)
         self.setStyleSheet(easy_qss())
@@ -299,12 +314,17 @@ class EasyPage(QWidget):
         top.addWidget(self.adv_btn)
         root.addLayout(top)
 
-        self.tracker = StepTracker(["Insert card", "Choose folder", "Start"])
+        self.tracker = StepTracker(["Connect", "Choose folder", "Start"])
         trow = QHBoxLayout()
         trow.addStretch(1)
         trow.addWidget(self.tracker, 3)
         trow.addStretch(1)
         root.addLayout(trow)
+        # two or more cards/devices: "All devices" + one chip each, with live status
+        self.switcher = DeviceSwitcher()
+        self.switcher.setVisible(False)
+        self.switcher.picked.connect(self._switch_device)
+        root.addWidget(self.switcher)
 
         # ------------------------------------------------ hero panel with one screen at a time
         self.hero = QFrame()
@@ -328,6 +348,7 @@ class EasyPage(QWidget):
         hl.addStretch(1)
         scroll = QScrollArea()
         scroll.setObjectName("EasyScroll")
+        self.scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -400,7 +421,7 @@ class EasyPage(QWidget):
         self.tab_group.button(idx).setChecked(True)
         if self.host.busy and self.stage.currentWidget() is self.run_view:
             return
-        self.tracker.set_labels(["Insert card", "Choose folder", "Start"] if idx == 0
+        self.tracker.set_labels(["Connect", "Choose folder", "Start"] if idx == 0
                                 else ["Videos folder", "Backup drive", "Start"])
         if idx == 1:
             self._scan_archive()
@@ -416,6 +437,8 @@ class EasyPage(QWidget):
         lay.addWidget(self.art, 0, Qt.AlignHCenter)
         self.fan = ThumbFan(self.loader)
         lay.addWidget(self.fan, 0, Qt.AlignHCenter)
+        self.chip = DeviceChip()
+        lay.addWidget(self.chip, 0, Qt.AlignHCenter)
         self.eyebrow = _lab("", "EasyEyebrow")
         lay.addWidget(self.eyebrow)
         self.title = _lab("", "EasyTitle")
@@ -425,10 +448,18 @@ class EasyPage(QWidget):
         lay.addWidget(self.sub)
         self.howto = HowToTiles()
         lay.addWidget(self.howto)
+        self.devices = DeviceGrid()
+        self.devices.picked.connect(self._pick_device)
+        lay.addWidget(self.devices, 0, Qt.AlignHCenter)
+        self.guide = GuideView()
+        lay.addWidget(self.guide)
         self.suggest = _lab("", "EasySuggest")
         self.suggest.setWordWrap(False)  # a wrapped, centered label negotiates itself too narrow
         self.suggest.setTextFormat(Qt.RichText)
         lay.addWidget(self.suggest, 0, Qt.AlignHCenter)
+        self.name_box = NameBox()
+        self.name_box.edited.connect(self._title_edited)
+        lay.addWidget(self.name_box, 0, Qt.AlignHCenter)
         self.primary = Beacon("Continue")
         self.primary.clicked.connect(lambda: self._primary_action and self._primary_action())
         lay.addWidget(self.primary, 0, Qt.AlignHCenter)
@@ -449,6 +480,7 @@ class EasyPage(QWidget):
             lab.setTextFormat(Qt.RichText)
             rl.addWidget(lab)
             ch = _link("Change", lambda _c=False, k=i: self._foot_actions[k] and self._foot_actions[k]())
+            ch.setProperty("default_text", "Change")
             rl.addWidget(ch)
             rl.addStretch(1)
             lay.addWidget(row)
@@ -546,9 +578,30 @@ class EasyPage(QWidget):
     def _show(self, *, art: str = "", fan: Optional[list] = None, eyebrow: str = "", title: str = "",
               tone: str = "", sub: str = "", howto: Optional[list] = None, suggest: str = "",
               primary: str = "", start: str = "", action=None, second: str = "", second_action=None,
-              foot: Optional[list] = None, steps: Optional[list[str]] = None, celebrate: bool = False) -> None:
+              foot: Optional[list] = None, steps: Optional[list[str]] = None, celebrate: bool = False,
+              chip: Optional[tuple] = None, devices: bool = False, guide: Optional[dict] = None,
+              name: bool = False, art_device: str = "") -> None:
+        if title != self.title.text() or self.stage.currentWidget() is not self.screen_view:
+            self.scroll.verticalScrollBar().setValue(0)  # a new screen starts at the top
         self.stage.setCurrentWidget(self.screen_view)
         self.art.setVisible(bool(art))
+        self.art.device = art_device
+        self.chip.setVisible(bool(chip))
+        if chip:
+            self.chip.set_device(*chip)
+        self.devices.setVisible(devices)
+        if devices:
+            self.devices.set_last(self.s.easy_device)
+        self.guide.setVisible(bool(guide))
+        if guide:
+            self.guide.set_guide(guide["routes"], guide.get("note", ""))
+        self.name_box.setVisible(name)
+        if name:
+            self.name_box.set_text(self._shoot_title)
+            self._update_name_preview()
+            if self._name_focus:  # first time this card's Start screen shows: typing replaces the default
+                self._name_focus = False
+                QTimer.singleShot(0, self.name_box.focus_and_select)
         if art:
             self.art.set_kind(art)
             if celebrate:
@@ -592,9 +645,12 @@ class EasyPage(QWidget):
         self._second_action = second_action
         foot = foot or []
         for i, (row, lab, ch) in enumerate(self.foot_rows):
-            text, act = foot[i] if i < len(foot) else ("", None)
-            row.setVisible(bool(text))
+            entry = foot[i] if i < len(foot) else ("", None)
+            text, act = entry[0], entry[1]
+            ch.setText(entry[2] if len(entry) > 2 else ch.property("default_text"))
+            row.setVisible(bool(text) or act is not None)
             lab.setText(text)
+            lab.setVisible(bool(text))
             ch.setVisible(act is not None)
             ch.setEnabled(True)
             self._foot_actions[i] = act
@@ -609,7 +665,7 @@ class EasyPage(QWidget):
         if any(f.get("key") == key for f in self._folders.values()):
             self.r_folders.update()
         if self.stage.currentWidget() is self.pick_view:
-            for _d, _f, grid, _h in self._pick_grids:
+            for _d, _f, grid, _h, _s in self._pick_grids:
                 grid.viewport().update()
             self.p_folders.update()
 
@@ -618,41 +674,218 @@ class EasyPage(QWidget):
             return  # the green "done" moment; the next step renders right after it
         if self.stage.currentWidget() is self.pick_view:
             same_tab = (self._pick_kind == "archive") == (self.s.easy_tab == 1)
-            same_card = self._pick_kind == "archive" or self.host.card_scan is self._pick_scan
+            same_card = self._pick_kind == "archive" or all(
+                (e := self.host.cards.get(sc.root)) is not None and e.scan is sc for sc in self._pick_scans)
             if same_tab and same_card and not self.host.busy:
                 self._pick_changed()
                 return
         if self.stage.currentWidget() is self.run_view and (self.host.busy or self._started_here):
             return
+        self._update_switcher()
         if self.s.easy_tab == 1:
             self._render_archive()
+        elif self._multi():
+            self._render_copy_all()
         else:
             self._render_copy()
 
     def on_volumes(self, vols: list) -> None:
         self._vols = list(vols)
+        if not self.host.cards:
+            self._title_root = None  # everything unplugged: the next shoot starts from the default name
+            self._view_all = True
         if not self.host.busy:
             self.refresh()
 
+    # ================================================================ several cards / devices
+    def _multi(self) -> bool:
+        return self._view_all and len(self.host.cards) >= 2 and self.s.easy_tab == 0
+
+    def _switch_device(self, root: str) -> None:
+        if self.host.busy and self.stage.currentWidget() is self.run_view:
+            return  # the running view already shows every device
+        if root:
+            self._view_all = False
+            self.host.select_card(root)
+        else:
+            self._view_all = True
+        if self.stage.currentWidget() is self.pick_view:
+            self.stage.setCurrentWidget(self.screen_view)
+            self._clear_pick_days()
+        self.refresh()
+
+    def _update_switcher(self) -> None:
+        cards = list(self.host.cards.values())
+        show = len(cards) >= 2 and self.s.easy_tab == 0
+        self.switcher.setVisible(show)
+        if not show:
+            return
+        busy = any(e.copying for e in cards)
+        new = sum(e.new_files for e in cards)
+        reading = sum(1 for e in cards if e.state in ("waiting", "scanning"))
+        if busy:
+            done = sum(e.job_done for e in cards)
+            total = sum(e.job_total for e in cards)
+            all_status, tone = f"Copying {done}/{total}", "busy"
+        elif reading:
+            all_status, tone = f"Reading {reading} of {len(cards)}…", "busy"
+        elif new:
+            all_status, tone = f"{new} new on {sum(1 for e in cards if e.new_files)}", "new"
+        else:
+            all_status, tone = "All saved", "done"
+        rows = [("", "all", f"All {len(cards)} devices", all_status, tone)]
+        for e in cards:
+            rows.append((e.root, e.icon, e.name, *e.status()))
+        self.switcher.set_devices(rows, "" if self._view_all else self.host.card_root)
+
+    def _cards_changed(self) -> None:
+        self._update_switcher()
+        sig = tuple((e.root, e.state, e.new_files) for e in self.host.cards.values())
+        if sig != self._cards_sig:
+            self._cards_sig = sig
+            if not self.host.busy and self.stage.currentWidget() is not self.run_view:
+                QTimer.singleShot(0, self.refresh)
+
+    def _render_copy_all(self) -> None:
+        cards = list(self.host.cards.values())
+        ready = self.host.ready_cards()
+        reading = [e for e in cards if e.state in ("waiting", "scanning")]
+        dest = self.s.offload_dest
+        dest_ok = bool(dest) and free_bytes(dest) >= 0
+        saving = [(f"Saving to  <b>{dest}</b>", self._pick_dest)] if dest else []
+        celebrate, self._celebrate = self._celebrate, False
+        n = len(cards)
+        if not ready:
+            if reading:
+                self._show(art="search", art_device=reading[0].icon, eyebrow="Step 1 of 3",
+                           title=f"Reading your {n} devices…",
+                           sub=f"{n - len(reading)} of {n} read. Each one appears above as soon as it's ready.",
+                           steps=["active", "todo", "todo"])
+            else:
+                self._show(art="empty", eyebrow="Step 1 of 3", title="No videos on these devices", tone="warn",
+                           sub="None of the connected cards or devices has camera videos or photos on it.",
+                           second="Copy from a folder instead", second_action=self._pick_source,
+                           steps=["active", "todo", "todo"])
+            return
+        names = " + ".join(e.name for e in ready)
+        if not dest_ok:
+            self._render_dest(ready[0].scan, None, names, dest)
+            return
+        self._plans = {e.root: self._compute_plan(e.scan) for e in ready}
+        with_new = [e for e in ready if self._plans[e.root]]
+        days: dict = {}
+        for e in with_new:
+            for d, f in self._plans[e.root]:
+                days.setdefault(d.day, (d, f))
+        self.plan = sorted(days.values(), key=lambda df: df[0].day, reverse=True)
+        still = (f" Still reading {', '.join(e.name for e in reading)}." if reading else "")
+        if not with_new:
+            self._show(art="done", eyebrow="All set", title=f"Everything on these {len(ready)} devices is saved",
+                       tone="ok", sub="You can remove them. Next time, only new videos are copied." + still,
+                       second="Choose videos to copy again or delete", second_action=self._open_pick,
+                       foot=saving, steps=["done", "done", "done"], celebrate=celebrate)
+            return
+        media = self._media([d for e in with_new for d, _ in self._plans[e.root]])
+        n_vid = sum(1 for _, _, g in media if g == "film")
+        n_pic = len(media) - n_vid
+        what = " and ".join(x for x in (_plural(n_vid, "new video") if n_vid else "",
+                                        _plural(n_pic, "photo") if n_pic else "") if x)
+        size = sum(f.size for e in with_new for d, _ in self._plans[e.root] for f in d.files)
+        k = len(with_new)
+        where = f"on {k} devices" if k > 1 else f"on {with_new[0].name}"
+        self._show(fan=media, eyebrow="Step 3 of 3", title=f"{what[0].upper() + what[1:]} {where}",
+                   name=any(d.day not in self._existing for d, _ in self.plan),
+                   sub=f"{human_bytes(size)} from {_plural(len(self.plan), 'day')} of shooting. Same-day videos from "
+                       "every device go into the same day folder, and each file is checked after it's copied."
+                       + still,
+                   start=f"Copy all {k} devices" if k > 1 else "Copy everything", action=self._go_copy,
+                   second="Choose which ones", second_action=self._open_pick,
+                   foot=saving, steps=["done", "done", "active"])
+
     # ================================================================ copy my card
-    def _compute_plan(self) -> list:
-        scan = self.host.card_scan
+    def _compute_plan(self, scan=None) -> list:
+        scan = scan or self.host.card_scan
         if not scan:
             return []
         dest = self.s.offload_dest
+        if self._title_root is None:  # first card/device of a session: start from the default name
+            self._title_root = "session"
+            self._shoot_title = self.s.default_title
+            self._day_titles = {}
+            self._name_focus = True
         existing = existing_day_folders(dest) if dest else {}
-        opts = offload_options(self.s, delete_source=False)  # Easy mode never deletes from a card
+        self._existing = existing
+        opts = offload_options(self.s, delete_source=False)  # Copy everything never deletes from a card
         dev = device_folders(self.s, scan)
         plan = []
         for day in scan.days:
-            t = title_from_existing(existing[day.day][0]) if day.day in existing else self.s.default_title
-            folder = day_folder_name(day.day, t, self.s.spaces_to_underscores)
+            folder = self._folder_for(day)
             if dest:
                 present, total, _ = day_presence(day, os.path.join(dest, folder), dev, opts)
                 if present >= total:
                     continue
             plan.append((day, folder))
         return plan
+
+    # ================================================================ shoot titles
+    def _folder_for(self, day) -> str:
+        """Existing folder for that date wins (new files join it); otherwise date + the shoot's name."""
+        if day.day in self._existing:
+            t = title_from_existing(self._existing[day.day][0])
+        else:
+            t = (self._day_titles.get(day.day) or self._shoot_title or "").strip() or self.s.default_title
+        return day_folder_name(day.day, t, self.s.spaces_to_underscores)
+
+    def _title_edited(self, text: str) -> None:
+        self._shoot_title = text
+        self.plan = [(d, self._folder_for(d)) for d, _f in self.plan]
+        self._plans = {r: [(d, self._folder_for(d)) for d, _f in pl] for r, pl in self._plans.items()}
+        self._update_name_preview()
+
+    def _update_name_preview(self) -> None:
+        new = [f for d, f in self.plan if d.day not in self._existing]
+        joined = [(d, f) for d, f in self.plan if d.day in self._existing]
+        bits = []
+        if new:
+            more = f" and {_plural(len(new) - 1, 'more day')}, each with its own date" if len(new) > 1 else ""
+            bits.append(f"Saves as <b>{new[0]}</b>{more}.")
+        if joined:
+            d, f = joined[0]
+            others = f" (+{len(joined) - 1} more)" if len(joined) > 1 else ""
+            bits.append(f"{d.day:%b} {d.day.day} already has a folder, <b>{f}</b>{others}: new files go there.")
+        if not (self._shoot_title or "").strip():
+            bits.append(f"Empty name: <b>{self.s.default_title}</b> is used.")
+        self.name_box.preview.setText("<br>".join(bits))
+
+    def _scan_chip(self, scan) -> Optional[tuple]:
+        if not scan or not scan.files:
+            return None
+        counts: dict = {}
+        for f in scan.files:
+            if f.role == "media":
+                counts[f.profile] = counts.get(f.profile, 0) + 1
+        prof = max(counts, key=counts.get) if counts else next(iter(scan.devices))
+        label = scan.devices.get(prof, "Camera")
+        kind = sources.icon_for_profile(prof, label)
+        dev = sources.device_of(scan.root)
+        vol = next((v for v in self._vols if v.root == scan.root), None)
+        if dev is not None:
+            kind = dev.kind if dev.kind != "card" else kind
+        usb = dev is not None or (vol is not None and vol.portable)
+        others = len(counts) - 1
+        text = label + (f" + {others} more" if others > 0 else "") + ("  ·  over USB" if usb else "")
+        return kind, text
+
+    # ================================================================ step 1: device picker
+    def _pick_device(self, kind: str) -> None:
+        self._device_pick = kind
+        self.s.easy_device = kind
+        self.s.save()
+        self.refresh()
+
+    def _all_devices(self) -> None:
+        self._device_pick = ""
+        self.refresh()
 
     @staticmethod
     def _media(days) -> list:
@@ -672,8 +905,15 @@ class EasyPage(QWidget):
         celebrate, self._celebrate = self._celebrate, False
 
         if self.host.scanning:
-            self._show(art="search", eyebrow="Step 1 of 3", title="Reading your card…",
-                       sub="This takes a few seconds.", steps=["active", "todo", "todo"])
+            vol = next((v for v in self._vols if v.root == self.host.card_root), None)
+            kind = ((vol.icon or sources.device_kind_for(vol.camera or "")) if vol else "") or "card"
+            thing = {"phone": "phone", "drone": "drone", "action": "GoPro", "360": "Insta360",
+                     "cinema": "camera"}.get(kind, "card")
+            usb = vol is not None and vol.portable
+            self._show(art="search", art_device=kind, eyebrow="Step 1 of 3", title=f"Reading your {thing}…",
+                       chip=(kind, (vol.camera or vol.name) + ("  ·  over USB" if usb else "")) if vol else None,
+                       sub=("Over USB this can take a little longer." if usb else "This takes a few seconds."),
+                       steps=["active", "todo", "todo"])
             return
         if not scan:
             note = self.host.card_note
@@ -683,20 +923,35 @@ class EasyPage(QWidget):
                            second="Copy from a folder instead", second_action=self._pick_source,
                            steps=["active", "todo", "todo"])
                 return
-            title = "Insert your camera card"
-            sub = "MMTX detects the card automatically. There's nothing to click on this step."
             if note == "unreadable":
-                title = "That card couldn't be read"
-                sub = "Take it out and put it back in. If it still doesn't appear, open Help."
-            self._show(art="insert", eyebrow="Step 1 of 3", title=title, sub=sub,
-                       howto=[("camera", "Take out the card", "Remove the memory card from your camera."),
-                              ("laptop", "Insert it", "Use the card slot on your computer or a USB card reader."),
-                              ("search", "MMTX finds it", "This screen updates by itself and shows what's new.")],
-                       second="Copy from a folder instead", second_action=self._pick_source,
+                self._show(art="empty", eyebrow="Step 1 of 3", title="That card couldn't be read", tone="warn",
+                           sub="Take it out and put it back in. If it still doesn't appear, open Help.",
+                           second="Copy from a folder instead", second_action=self._pick_source,
+                           foot=saving, steps=["active", "todo", "todo"])
+                return
+            if self._device_pick:
+                g = device_guide(self._device_pick)
+                self._show(art="device", art_device=self._device_pick, eyebrow="Step 1 of 3", title=g["title"],
+                           sub=g["sub"] + " MMTX finds it by itself.", guide=g,
+                           second="Copy from a folder instead", second_action=self._pick_source,
+                           foot=[("", self._all_devices, "Pick a different device")] + saving,
+                           steps=["active", "todo", "todo"])
+                return
+            self._show(eyebrow="Step 1 of 3", title="What are you copying from?",
+                       sub="Plug in its memory card and MMTX finds it by itself. "
+                           "Tap your camera to see how to connect it.",
+                       devices=True, second="Copy from a folder instead", second_action=self._pick_source,
                        foot=saving, steps=["active", "todo", "todo"])
             return
         cams = " + ".join(scan.devices.values())
+        chip = self._scan_chip(scan)
         if not dest_ok:
+            self._render_dest(scan, chip, cams, dest)
+            return
+        self._render_ready(scan, chip, saving, celebrate)
+
+    def _render_dest(self, scan, chip, cams: str, dest: str) -> None:
+        if True:
             self._suggestion = suggest_place(self._vols, "MMTX Videos", avoid=scan.root)
             example = day_folder_name(scan.days[0].day, self.s.default_title, self.s.spaces_to_underscores)
             self.art.folder_names = [day_folder_name(d.day, self.s.default_title, self.s.spaces_to_underscores)
@@ -710,16 +965,17 @@ class EasyPage(QWidget):
             if self._suggestion:
                 where, free = self._suggestion
                 self._show(art="choose", eyebrow="Step 2 of 3", title="Choose where to save your videos", sub=sub,
-                           suggest=f"Suggested:  <b>{where}</b>   ·   {human_bytes(free)} free",
+                           chip=chip, suggest=f"Suggested:  <b>{where}</b>   ·   {human_bytes(free)} free",
                            primary="Use this folder", action=self._use_suggestion,
                            second="Choose a different folder", second_action=self._pick_dest,
                            steps=["done", "active", "todo"])
             else:
                 self._show(art="choose", eyebrow="Step 2 of 3", title="Choose where to save your videos", sub=sub,
-                           primary="Choose folder", action=self._pick_dest, steps=["done", "active", "todo"])
-            return
+                           chip=chip, primary="Choose folder", action=self._pick_dest, steps=["done", "active", "todo"])
+
+    def _render_ready(self, scan, chip, saving: list, celebrate: bool) -> None:
         if not self.plan:
-            self._show(art="done", eyebrow="All set", title="Everything on this card is saved", tone="ok",
+            self._show(art="done", eyebrow="All set", title="Everything on this card is saved", tone="ok", chip=chip,
                        sub="You can remove the card. Next time you insert it, only new videos are copied.",
                        second="Choose videos to copy again or delete from the card", second_action=self._open_pick,
                        foot=saving, steps=["done", "done", "done"], celebrate=celebrate)
@@ -731,9 +987,13 @@ class EasyPage(QWidget):
                                         _plural(n_pic, "photo") if n_pic else "") if x)
         days = len(self.plan)
         size = sum(f.size for d, _ in self.plan for f in d.files)
+        phone = any(f.profile == "phone" for d, _ in self.plan for f in d.files)
+        recent = (f" Showing the last {_plural(self.s.phone_recent_days, 'day')} from the phone."
+                  if phone and self.s.phone_recent_days > 0 else "")
         self._show(fan=media, eyebrow="Step 3 of 3", title=f"{what[0].upper() + what[1:]} ready to copy",
+                   chip=chip, name=any(d.day not in self._existing for d, _ in self.plan),
                    sub=f"{human_bytes(size)} from {_plural(days, 'day')} of shooting. "
-                       "Each file is checked after it's copied.",
+                       f"Each file is checked after it's copied.{recent}",
                    start="Copy everything", action=self._go_copy,
                    second="Choose which ones", second_action=self._open_pick,
                    foot=saving, steps=["done", "done", "active"])
@@ -768,19 +1028,23 @@ class EasyPage(QWidget):
         self.host.update_drives()
         self.refresh()
 
-    def _day_folder(self, day, existing: dict) -> str:
-        t = title_from_existing(existing[day.day][0]) if day.day in existing else self.s.default_title
-        return day_folder_name(day.day, t, self.s.spaces_to_underscores)
-
     def _go_copy(self) -> None:
-        self._start_copy(self.plan, delete=False, beacon=self.start)
+        if self._multi():
+            self._start_copy({r: pl for r, pl in self._plans.items() if pl}, delete=False, beacon=self.start)
+        elif self.host.card_scan is not None:
+            self._start_copy({self.host.card_scan.root: self.plan}, delete=False, beacon=self.start)
 
-    def _start_copy(self, selections: list, delete: bool, beacon) -> None:
-        scan = self.host.card_scan
-        if not (scan and selections) or self.host.busy:
+    def _scan_for(self, root: str):
+        e = self.host.cards.get(root)
+        return e.scan if e is not None else None
+
+    def _start_copy(self, selections: dict, delete: bool, beacon) -> None:
+        """selections: card root -> [(day, folder)]. Several roots become one job, copied side by side."""
+        selections = {r: sel for r, sel in selections.items() if sel and self._scan_for(r) is not None}
+        if not selections or self.host.busy:
             return
         dest = self.s.offload_dest
-        if is_inside(dest, scan.root):
+        if any(is_inside(dest, r) for r in selections if not r.startswith("portable://")):
             EasyDialog(self, "warn", "That folder is on the card itself",
                        "Choose a folder on your computer's drive instead (click Change).", ["OK"]).ask()
             return
@@ -789,12 +1053,24 @@ class EasyPage(QWidget):
         except OSError as e:
             EasyDialog(self, "bad", "MMTX can't save there", f"{dest}<br><br>{e.strerror or e}", ["OK"]).ask()
             return
-        job = plan_offload(scan, selections, dest, device_folders(self.s, scan), offload_options(self.s, delete))
-        if not job.groups:
+        jobs = []
+        for root, sel in selections.items():
+            sc = self._scan_for(root)
+            j = plan_offload(sc, sel, dest, device_folders(self.s, sc), offload_options(self.s, delete))
+            if j.groups:
+                jobs.append(j)
+        if not jobs:
             return
-        if not self.host.preflight(job, dest, easy=True):
-            return
-        self.host.resolve_workers(job, scan.root, dest)
+        if len(jobs) == 1:
+            job = jobs[0]
+            if not self.host.preflight(job, dest, easy=True):
+                return
+            self.host.resolve_workers(job, job.groups[0].source_root, dest)
+        else:
+            roots = [j.groups[0].source_root for j in jobs]
+            job = merge_offload_jobs(jobs, self.host.source_limits(roots, dest))
+            if not self.host.preflight(job, dest, easy=True):
+                return
         self._job_delete = delete
         self._finish_step(beacon, "Started", lambda: self._launch(job, dest))
 
@@ -984,16 +1260,35 @@ class EasyPage(QWidget):
         self._pick_changed()
 
     def _open_pick_copy(self) -> None:
-        scan = self.host.card_scan
-        if not scan:
+        scans = [e.scan for e in self.host.ready_cards()] if self._multi() else (
+            [self.host.card_scan] if self.host.card_scan else [])
+        if not scans:
             return
         dest = self.s.offload_dest
-        existing = existing_day_folders(dest) if dest else {}
+        self._existing = existing_day_folders(dest) if dest else {}
         opts = offload_options(self.s, False)
-        dev = device_folders(self.s, scan)
         self._clear_pick_days()
+        self._pick_where = {}
+        for scan in scans:
+            self._pick_device_days(scan, dest, opts, header=len(scans) > 1)
+        self._pick_scans = scans
+        self._pick_scan = scans[0]
+        self._finish_open_pick_copy()
+
+    def _pick_device_days(self, scan, dest: str, opts, header: bool) -> None:
+        dev = device_folders(self.s, scan)
+        if header:
+            box = QWidget()
+            bl = QHBoxLayout(box)
+            bl.setContentsMargins(0, 18, 0, 0)
+            chip = DeviceChip()
+            kind, text = self._scan_chip(scan) or ("card", scan.root)
+            chip.set_device(kind, text)
+            bl.addWidget(chip)
+            bl.addStretch(1)
+            self.p_days.addWidget(box)
         for day in scan.days:
-            folder = self._day_folder(day, existing)
+            folder = self._folder_for(day)
             present = day_presence(day, os.path.join(dest, folder), dev, opts)[2] if dest else set()
             clips: dict = {}
             for f in day.files:
@@ -1025,19 +1320,37 @@ class EasyPage(QWidget):
             hl.setSpacing(12)
             col = QVBoxLayout()
             col.setSpacing(0)
-            col.addWidget(_lab(f"{day.day:%A, %B} {day.day.day}", "PickDay", center=False))
+            top = QHBoxLayout()
+            top.setSpacing(12)
+            top.addWidget(_lab(f"{day.day:%A, %B} {day.day.day}", "PickDay", center=False))
             what = ", ".join(x for x in (_plural(n_vid, "video") if n_vid else "",
                                          _plural(n_pic, "photo") if n_pic else "") if x)
-            col.addWidget(_lab(f"{what}  ·  {human_bytes(day.size)}  ·  saves to {folder}", "PickDaySub",
-                               center=False))
+            where = _lab("", "PickDaySub", center=False)
+            if day.day not in self._existing:
+                ed = QLineEdit(self._day_titles.get(day.day) or self._shoot_title)
+                ed.setObjectName("PickTitle")
+                ed.setMaxLength(60)
+                ed.setFixedWidth(260)
+                ed.setPlaceholderText(self.s.default_title)
+                ed.setToolTip("Name for this day's folder")
+                ed.textEdited.connect(lambda t, d=day, src=ed: self._day_title_edited(d, t, src))
+                top.addWidget(ed)
+            top.addStretch(1)
+            col.addLayout(top)
+            where.setText(f"{what}  ·  {human_bytes(day.size)}  ·  saves to {folder}"
+                          + ("  (already there)" if day.day in self._existing else ""))
+            self._pick_where.setdefault(day.day, []).append(
+                (where, what, day, ed if day.day not in self._existing else None))
+            col.addWidget(where)
             hl.addLayout(col, 1)
             hl.addWidget(_tool("All", lambda _c=False, g=grid: g.set_all(True)))
             hl.addWidget(_tool("None", lambda _c=False, g=grid: g.set_all(False)))
             self.p_days.addWidget(head)
             self.p_days.addWidget(grid)
             grid.fit()
-            self._pick_grids.append((day, folder, grid, head))
-        self._pick_scan = scan
+            self._pick_grids.append((day, folder, grid, head, scan))
+
+    def _finish_open_pick_copy(self) -> None:
         self.p_title.setText("Choose what to copy")
         self.p_sub.setText("Tap a video to add it or take it out. New videos are already chosen; "
                            "videos tagged Saved are already on your computer.")
@@ -1080,19 +1393,27 @@ class EasyPage(QWidget):
         self.p_del.setChecked(self.s.archive_move)
         self._enter_pick("archive")
 
+    def _day_title_edited(self, day, text: str, src) -> None:
+        """One name per date: every device's section for that day follows."""
+        self._day_titles[day.day] = text
+        for lab, what, d, ed in self._pick_where.get(day.day, []):
+            lab.setText(f"{what}  ·  {human_bytes(d.size)}  ·  saves to {self._folder_for(d)}")
+            if ed is not None and ed is not src and ed.text() != text:
+                ed.setText(text)
+
     def _pick_all(self, on: bool) -> None:
         if self._pick_kind == "archive":
             self.p_folders.set_all(on)
         else:
-            for _d, _f, grid, _h in self._pick_grids:
+            for _d, _f, grid, _h, _s in self._pick_grids:
                 grid.set_all(on)
 
     def _pick_only_new(self) -> None:
-        for _d, _f, grid, _h in self._pick_grids:
+        for _d, _f, grid, _h, _s in self._pick_grids:
             grid.set_all(True, only_new=True)
 
     def _picked_clips(self) -> list:
-        return [i for _d, _f, grid, _h in self._pick_grids for i in grid.infos() if i.get("picked")]
+        return [i for _d, _f, grid, _h, _s in self._pick_grids for i in grid.infos() if i.get("picked")]
 
     def _pick_changed(self) -> None:
         if self.stage.currentWidget() is not self.pick_view:
@@ -1106,7 +1427,7 @@ class EasyPage(QWidget):
             label = f"{'Move' if delete else 'Copy'} {_plural(n, 'folder')}" if n else "Choose at least one folder"
         else:
             chosen = self._picked_clips()
-            total = sum(grid.count() for _d, _f, grid, _h in self._pick_grids)
+            total = sum(grid.count() for _d, _f, grid, _h, _s in self._pick_grids)
             n = len(chosen)
             n_vid = sum(1 for i in chosen if i["kind"] in ("video", "360"))
             what = " and ".join(x for x in (_plural(n_vid, "video") if n_vid else "",
@@ -1127,21 +1448,22 @@ class EasyPage(QWidget):
             chosen = [r["wf"] for r in self.p_folders.rows if r.get("picked")]
             self._start_archive(chosen, delete, beacon=self.p_go)
             return
-        scan = self.host.card_scan
-        if scan is None or scan is not self._pick_scan:
-            self._pick_back()
+        if not all((e := self.host.cards.get(sc.root)) is not None and e.scan is sc for sc in self._pick_scans):
+            self._pick_back()  # a card was pulled or re-read meanwhile
             return
-        selections = []
-        for day, folder, grid, _h in self._pick_grids:
+        selections: dict = {}
+        for day, _folder, grid, _h, sc in self._pick_grids:
             keys = {i["clip"] for i in grid.infos() if i.get("picked")}
             if keys:
-                selections.append((DayGroup(day.day, [f for f in day.files if (f.profile, f.key) in keys]), folder))
+                selections.setdefault(sc.root, []).append(
+                    (DayGroup(day.day, [f for f in day.files if (f.profile, f.key) in keys]), self._folder_for(day)))
         if not selections:
             return
         if delete:
             n = len(self._picked_clips())
+            many = len(selections) > 1
             msg = (f"<b>{_plural(n, 'file')}</b> will be copied to <b>{self.s.offload_dest}</b> and checked. "
-                   "Then they're deleted from the card.<br><br>"
+                   f"Then they're deleted from {'each card or device' if many else 'the card'}.<br><br>"
                    "If anything from a day doesn't check out, nothing from that day is deleted.")
             if EasyDialog(self, "warn", "Delete from the card after copying?", msg,
                           ["Copy and delete", "Cancel"]).ask() != 0:
@@ -1197,8 +1519,12 @@ class EasyPage(QWidget):
             n_pic = len(infos) - n_vid
             what = " and ".join(x for x in (_plural(n_vid, "video") if n_vid else "",
                                             _plural(n_pic, "photo") if n_pic else "") if x)
-            self.r_title.setText(f"Copying {what or _plural(n_files, 'file')}")
-            self.r_note.setText("Keep the card in until this finishes")
+            roots = {t.src_root or g.source_root for g in job.groups for t in g.tasks}
+            self._job_devices = len(roots)
+            frm = f" from {len(roots)} devices" if len(roots) > 1 else ""
+            self.r_title.setText(f"Copying {what or _plural(n_files, 'file')}{frm}")
+            self.r_note.setText("Keep every card and device connected until this finishes" if len(roots) > 1
+                                else "Keep the card in until this finishes")
             self.tracker.set_states(["done", "done", "done"])
             self.r_grid.setVisible(True)
             self.r_folders.setVisible(False)
@@ -1222,8 +1548,10 @@ class EasyPage(QWidget):
     def _build_tiles(self, job) -> None:
         self.r_grid.clear()
         self._tiles = {"_by_key": {}}
-        scan = self.host.card_scan
-        by_path = {f.path: f for f in scan.files} if scan else {}
+        by_path = {}
+        for e in self.host.cards.values():
+            if e.scan is not None:
+                by_path.update({f.path: f for f in e.scan.files})
         for g in job.groups:
             for t in g.tasks:
                 f = by_path.get(t.src)
@@ -1403,7 +1731,8 @@ class EasyPage(QWidget):
                 gone = sum(1 for g in res.groups if g.source_deleted)
                 msg = (f"{_plural(n, 'file')} saved to <b>{where}</b> and checked."
                        + ("<br>They've been deleted from the card." if self._job_delete and gone else "")
-                       + "<br><br><b>You can remove the card now.</b>")
+                       + ("<br><br><b>You can remove the cards now.</b>" if getattr(self, "_job_devices", 1) > 1
+                          else "<br><br><b>You can remove the card now.</b>"))
             else:
                 moved = sum(1 for g in res.groups if g.source_deleted)
                 msg = (f"{_plural(len(res.groups), 'day folder')} saved to <b>{where}</b> and checked."
@@ -1418,12 +1747,13 @@ class EasyPage(QWidget):
         example = day_folder_name(date.today(), self.s.default_title, self.s.spaces_to_underscores)
         age = int(self.s.older_than_days)
         items = [
-            ("My card isn't showing up",
+            ("My card or camera isn't showing up",
              "• Push the card all the way in until it clicks, or try a USB card reader.<br>"
-             "• Check that the card shows up in File Explorer (Finder on a Mac). If the computer can't see it, "
+             "• Check that it shows up in File Explorer (Finder on a Mac). If the computer can't see it, "
              "MMTX can't either.<br>"
-             "• Cameras plugged in with a USB cable often don't appear as a drive (most GoPros work this way). "
-             "Take the card out of the camera instead.<br>"
+             "• Using a USB-C cable? Each camera has a setting for it (GoPro: MTP, Sony: Mass Storage, "
+             "Insta360: File Transfer). On step 1, tap your camera for the exact steps.<br>"
+             "• Phones: unlock the phone and allow file access (Android: File transfer, iPhone: Trust).<br>"
              "• If the videos are already in a folder, use <b>Copy from a folder instead</b>.",
              [("Copy from a folder instead", self._pick_source)]),
             ("Where are my videos saved?",
@@ -1465,7 +1795,7 @@ class EasyPage(QWidget):
             age = int(self.s.older_than_days)
             steps = [
                 (self.tracker, "Your progress",
-                 "Three steps: insert a card, choose where videos are saved (only once), then start. "
+                 "Three steps: connect a card, camera or phone, choose where videos are saved (only once), then start. "
                  "The current step is red. Finished steps turn green."),
                 (self.hero, "What to do next",
                  "This panel always shows the next step. When there's something to click, its button flashes "

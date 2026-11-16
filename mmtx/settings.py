@@ -66,6 +66,8 @@ class Settings:
     easy_tour_done: bool = False
     easy_tab: int = 0
     easy_palette: str = "graphite"  # graphite | midnight | daylight | contrast
+    easy_device: str = ""  # last device picked in Easy mode (drone | action | 360 | cinema | phone | card)
+    phone_recent_days: int = 30  # phones hold years of photos: show only this many recent days (0 = all)
 
     @classmethod
     def load(cls) -> "Settings":

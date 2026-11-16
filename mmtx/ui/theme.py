@@ -55,6 +55,10 @@ QPushButton#Primary {{ background: {ACCENT}; border: none; color: white; font-we
                        padding: 11px 26px; border-radius: 10px; }}
 QPushButton#Primary:hover {{ background: {ACCENT_HOVER}; }}
 QPushButton#Primary:disabled {{ background: #253049; color: #7d8bab; }}
+QPushButton#AllCards {{ background: transparent; border: 2px solid {ACCENT}; color: #ffffff; font-weight: 700;
+                        font-size: 10.5pt; padding: 10px 16px; border-radius: 10px; }}
+QPushButton#AllCards:hover {{ background: #1b2540; }}
+QPushButton#AllCards:disabled {{ border-color: #2a3350; color: #6b7690; }}
 QPushButton#Danger {{ background: transparent; border: 1px solid #5a2a30; color: {DANGER}; }}
 QPushButton#Danger:hover {{ background: #2a1619; }}
 QPushButton#Danger:disabled {{ border-color: #2a2f3a; color: #4b5262; }}
@@ -120,6 +124,7 @@ QFrame#CardTile:hover, QFrame#DriveTile:hover {{ border-color: #2c3448; }}
 QFrame#CardTile[active="true"] {{ border: 1px solid {ACCENT}; background: #141b2c; }}
 QLabel#TileTitle {{ color: {TEXT}; font-weight: 700; font-size: 9.5pt; }}
 QLabel#TileSub {{ color: {MUTED}; font-size: 8.3pt; }}
+QLabel#TileStatus {{ font-size: 8.6pt; }}
 QLabel#TileCaps {{ color: #5f6880; font-size: 7.6pt; font-weight: 800; letter-spacing: 1px; }}
 QLabel#TileKind {{ color: #8fb0ff; font-size: 7.8pt; font-weight: 700; }}
 QProgressBar#Cap {{ min-height: 5px; max-height: 5px; border-radius: 2px; background: #1c212c; }}

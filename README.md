@@ -16,9 +16,19 @@ Inspired by [mmt](https://github.com/konradit/mmt) and [GPTransfer](https://gith
 
 For anyone who just wants their videos saved: one step at a time, big type, and exactly one thing to click. Switch with the **Easy mode** button at the bottom of the sidebar, and back with **Advanced** in the corner. MMTX remembers which one you used last.
 
-| 1. Insert card | 2. Choose folder (once) | 3. Start |
+| 1. Connect | 2. Choose folder (once) | 3. Name it and start |
 |---|---|---|
-| ![insert](docs/easy_1_insert.png) | ![choose](docs/easy_2_choose.png) | ![start](docs/easy_3_ready.png) |
+| ![connect](docs/easy_1_insert.png) | ![choose](docs/easy_2_choose.png) | ![start](docs/easy_3_ready.png) |
+
+- **What are you copying from?** Step 1 shows a tile per device type: DJI drone, GoPro, Insta360, Sony camera, Phone, Other memory card (original device icons, not the makers' logos). Plugging in a card or camera is still enough on its own: MMTX finds it. Tapping a device shows how to connect that exact device, with a **Memory card** route and a **USB-C cable** route, written for the computer you're on:
+
+  | GoPro | Sony | Phone |
+  |---|---|---|
+  | ![gopro](docs/easy_1b_guide_gopro.png) | ![sony](docs/easy_1c_guide_sony.png) | ![phone](docs/easy_1d_guide_phone.png) |
+
+  The camera settings come from each maker's own instructions: GoPro *Preferences > Connections > USB Connection > MTP*; Sony FX3 *MENU > Setup > USB > USB Connection Mode > MassStorage(MSC)* (and CFexpress Type A needs its own reader); Insta360 *File Transfer* (X4/X5/X6) or *U-Disk Mode* (X3); DJI drones plugged in while off; Android *File transfer*; iPhone *Trust* plus *Settings > Photos > Transfer to Mac or PC > Keep Originals* (Windows also needs Apple's *Apple Devices* app).
+- **Name this shoot.** The Start screen has a name field, pre-filled with your default title and selected, so typing replaces it: `Beach Run` makes `2026_11_14_Beach_Run`. Every new day on the card gets that name with its own date; a day that already has a folder keeps it and new files join it. Under **Choose which ones**, each day has its own name field (e.g. Nov 13 becomes `2026_11_13_Hike`). An empty name falls back to the default, so a folder is never just a date.
+- **The device is shown** as a chip above the title once it's read ("GoPro HERO13 Black", "Pixel 8 · over USB").
 
 **Colors mean the same thing everywhere:**
 
@@ -49,7 +59,42 @@ For anyone who just wants their videos saved: one step at a time, big type, and 
 - **Help** answers the real questions: a card that doesn't show up, where videos are saved, when it's safe to remove the card, what "checked" means, pressing Start twice, freeing up space. **Show me around** walks through the screen with Back/Next.
 - Problems get plain-language popups ("The card was removed too early. Put it back in and press Start again.") with the technical details one click away.
 
-**Easy and Advanced are two views of the same session.** The card scan and any running transfer belong to the app, not to a page. Start a copy in Easy mode, switch to Advanced, and the Offload page shows the same clips with live copy/check rings. Start an archive and the Archive page shows each folder as Waiting, Copying 7/13, Checking, Moved. Folders and settings chosen in one show up in the other.
+**Easy and Advanced are two views of the same session.** The card scan and any running transfer belong to the app, not to a page. Start a copy in Easy mode, switch to Advanced, and the Offload page shows the same clips live. Start an archive and the Archive page shows each folder as Waiting, Copying 7/13, Moved. Folders and settings chosen in one show up in the other.
+
+**Advanced uses the same status graphics:** grey waiting tiles, a blue pulsing outline with a rotating hourglass in a progress ring while a clip copies, orange "Almost done", and a large green check with a green outline when it's saved. Archive rows get the same overlay on their poster plus a status pill with the hourglass or check. Cards in the sidebar and the page header show the device icon (drone, action cam, 360, cinema camera, phone, card).
+
+| Advanced offload | Advanced archive |
+|---|---|
+| ![offload](docs/2_offload_progress.png) | ![archive](docs/sync_2_advanced_archive_during_easy_move.png) |
+
+## Several cards and devices at once
+
+Plug in everything from a shoot: the GoPro card, the drone card, the FX3's cards, your phone. MMTX reads each one in the background as it shows up and keeps the result, so every device has its own live status and switching between them is instant.
+
+| Easy: All devices | Copying all of them |
+|---|---|
+| ![all](docs/multi_1_all_devices.png) | ![copying](docs/multi_3_copying_all.png) |
+
+- **Each device says where it stands:** *Reading…*, *24 new · 1.4 GB*, *Copying 4/7*, *Saved*, *All saved*. In Easy mode on the chips above the steps, in Advanced on the card tiles in the sidebar.
+- **Easy mode:** with two or more connected, a switcher appears: **All N devices** plus one chip per device. *All* shows everything that's new across them with one name for the shoot and **Copy all N devices**. Tap a device to see and copy just that one. **Choose which ones** works across all of them (one section per device, one name per day).
+- **Advanced:** click a card in the sidebar to show it (no re-read). **Offload all N cards** copies this card's selected days with their titles, plus the new days of every other card with the default title.
+- **One day, one folder:** same-day files from every device land in the same `YYYY_MM_DD_<Title>` folder with one checksum file. If two cameras used the same file name (two GoPros both have `GX010001.MP4`), both are kept (`GX010001_1.MP4`).
+- **Side by side:** the devices are copied at the same time, each within its own limit (a card reader 2 files at once, a phone 1), so two card readers on separate ports roughly double the speed. Every file is still read once while hashed, written, read back and compared.
+- After the copy, every device involved is re-read and switches to *All saved*. Pull a card and another one takes over the screen.
+
+![advanced](docs/multi_5_advanced_offload_all.png)
+
+## Phones and cameras over USB
+
+Phones, and GoPros connected by cable, use MTP: they show up in Explorer under *This PC* but have no drive letter, so nothing can open their files directly. MMTX reads them anyway:
+
+- **Windows:** through Windows Portable Devices (the same API Explorer uses), via `comtypes`. Phones, iPhones, GoPro over USB and cameras left in MTP mode all appear as cards in the sidebar and in Easy mode.
+- **Linux:** the desktop already mounts them under `/run/user/<uid>/gvfs`; MMTX lists those mounts as cards.
+- **macOS:** no built-in MTP. Use the memory card, or import with Image Capture (iPhone) / OpenMTP (Android) into a folder and use *Copy from a folder*.
+
+Copying from a USB device works exactly like a card: each file is read once while it's hashed, written, read back from the destination, and compared. Differences: one file at a time (MTP devices misbehave with parallel reads), only the camera folder (`DCIM`) is read, phones show the last 30 days by default (*Settings > Phones*), and thumbnails show the device icon instead of a frame, because making one would mean pulling the whole clip over the cable. *Delete from card* works too: a file is removed from the phone only after its copy checks out.
+
+The Windows device code follows Microsoft's documented WPD calls and is covered by tests through a simulated device, but it hasn't been run against a real phone yet. If a device doesn't show up, the log says why, and the memory card route always works.
 
 ## What it does
 
@@ -71,7 +116,7 @@ For anyone who just wants their videos saved: one step at a time, big type, and 
 
 ## Daily workflow
 
-1. **Plug in the card.** It shows up in the sidebar within a few seconds and Offload opens it: one card per shooting day, with a thumbnail, duration and time for every clip. Days that aren't on the working drive yet are pre-selected. Clips already on the working drive carry a hollow green check. Double-click a tile to play the clip.
+1. **Plug in the card** (or several: each gets a sidebar tile with its own status, click one to show it). It shows up in the sidebar within a few seconds and Offload opens it: one card per shooting day, with a thumbnail, duration and time for every clip. Days that aren't on the working drive yet are pre-selected. Clips already on the working drive carry a hollow green check. Double-click a tile to play the clip.
 2. **Set titles.** The default title (e.g. `DailyRun`) fills every day. Type in a day's title box to change just that day (`Beach Sunrise` → `2026_11_13_Beach_Sunrise`). If a folder for that date already exists on the working drive, its title is picked up automatically and new files merge into it.
 3. **Click Offload.** Each tile shows a progress ring while it copies and verifies, then a solid green check. The transfer bar shows the clip in flight. The summary lists copied / already there / failed, plus copy and read-back speeds.
 
@@ -150,7 +195,8 @@ If two cameras ever produce the same file name on the same day, nothing is overw
 | **DJI** drones, Osmo Action / Pocket / 360 | `DCIM/DJI_001`, `DCIM/100MEDIA`, `PANORAMA`: MP4, LRF, SRT, JPG, DNG, OSV | Timestamp in the filename (`DJI_YYYYMMDDhhmmss_…`), else file time |
 | **Insta360** X-series, GO, Ace | `DCIM/Camera01`: insv, insp, lrv, mp4, dng | Timestamp in the filename. Model sniffed from the `.insv` |
 | **Sony** FX3 / FX30 / A7S III / any XAVC body | `PRIVATE/M4ROOT/CLIP` (+ `M01.XML`), `SUB` proxies, `THMBNL`, `DCIM/100MSDCF` | `CreationDate` in the XML sidecar (ignores a wrong file clock). Model from the XML |
-| **Anything else** | Media files anywhere on the card | File timestamp (Pixel `PXL_` names parsed) |
+| **Phones** (Android, iPhone) | `DCIM/Camera`, `DCIM/1xxAPPLE`, over USB or from a folder | Timestamp in the filename (`PXL_…`, `IMG_YYYYMMDD_…`, Samsung `YYYYMMDD_hhmmss`), else file time |
+| **Anything else** | Media files anywhere on the card | File timestamp |
 
 A clip's proxy, thumbnail and sidecar always land on the same day as the clip, even when recording runs past midnight. Camera junk (`MISC`, `MEDIAPRO.XML`, `STATUS.BIN`, log files) is ignored.
 
@@ -187,10 +233,11 @@ With several files in flight, output names are reserved under a lock, so two car
 - **Keep card folder structure** (for Sony Catalyst Browse, which wants `PRIVATE/M4ROOT/…`).
 - **Rename GoPro chapters** so they sort together: `GX010123.MP4` → `GX0123_01.MP4`.
 - **Thumbnails** on/off.
+- **Phones:** how many recent days to show from a phone (default 30, 0 = all).
 
 ## Notes
 
-- **USB connections:** cameras that connect over USB as MTP (several GoPro models, phones) don't appear as a drive. Use a card reader. Insta360 X-series and DJI drones in USB storage mode work fine.
+- **USB connections:** see [Phones and cameras over USB](#phones-and-cameras-over-usb). A card reader is still the fastest route for big days.
 - **Sony cards:** deleting clips outside the camera leaves its clip database out of sync (the camera will offer to repair it). Formatting in camera is cleaner, so *Delete from card* is off by default.
 - Network shares are never auto-listed as cards, but you can still Browse to one as a destination.
 - To rename the app, change `APP_NAME` in `mmtx/__init__.py`.
@@ -203,6 +250,8 @@ python tests/test_media.py            # durations, ffmpeg keyframes (H.264 + HEV
 python tests/gui_smoke.py shots/      # drives the real window headless end to end and saves screenshots
 python tests/gui_easy.py shots/       # Easy mode from a fresh install: custom selection + delete, switching to
                                       # Advanced mid-transfer, every palette
+python tests/gui_multi.py shots/      # two cards + a phone: background reading, switching, Copy all,
+                                      # Offload all cards, unplugging
 python tests/bench.py SRC_DIR DST_DIR # files-at-once benchmark on your own drives
 python tests/make_fake_cards.py out/  # fake GoPro / DJI / Insta360 / FX3 cards to play with
 ```
@@ -227,6 +276,11 @@ mmtx/
   ui/easy_widgets.py  step tracker, illustrations, thumbnail fan, flashing step button, progress ring,
                  folder rows (live + pick), delete switch, Colors picker, dialogs, Help, walkthrough
   ui/easy_clips.py    big clip tiles: waiting/copying/almost/done states, hourglass, pick mode
+  ui/easy_devices.py  step 1 device picker, per-device connection steps, device chip, "Name this shoot",
+                 device switcher
+  ui/session.py  every connected card/device: background reading, status, per-device read limits
+  sources.py     where source files come from: paths, or portable://… devices (phones, GoPro over USB)
+  wpd.py         Windows Portable Devices backend (comtypes)
   ui/palettes.py      Easy palettes and the Easy style sheet
 ```
 
@@ -237,11 +291,14 @@ MMTX is written from scratch in Python and contains no code from either project 
 - **[mmt (Media Management Tool)](https://github.com/konradit/mmt)** by [KonradIT](https://github.com/KonradIT), Apache-2.0. A Go command-line tool for importing videos and photos from GoPro, Insta360 and DJI cameras: it renames and organizes files, groups related shots, merges GoPro chaptered videos and sorts media into folders by camera. MMTX's per-camera card detection, folder-per-camera layout and the GoPro chapter-renaming option follow its lead, and the name is a nod to it.
 - **[GPTransfer](https://github.com/omokage-code/GPTransfer)** by [omokage-code](https://github.com/omokage-code), MIT. A macOS app for safely transferring GoPro files to a Mac. It treats camera files as read-only, writes incomplete transfers to `.partial` files and verifies before finalizing. MMTX's read-only card handling and `.mmtx-partial` files follow that model, extended with checksums and read-back verification, and its GUI-first approach is why MMTX is a desktop app rather than a CLI.
 
+The Windows phone support was written against Microsoft's [Windows Portable Devices](https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/wpd-application-programming-reference) documentation, using the comtypes call patterns shown in [Heribert17/mtp](https://github.com/Heribert17/mtp) and [KasparNagu/PortableDevices](https://github.com/KasparNagu/PortableDevices) as a guide (no code copied).
+
 Built with:
 
 - [Qt for Python (PySide6)](https://doc.qt.io/qtforpython-6/) for the interface
 - [xxHash](https://github.com/Cyan4973/xxHash) by Yann Collet, via [python-xxhash](https://github.com/ifduyue/python-xxhash), for checksums
 - [FFmpeg](https://ffmpeg.org/), via [imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg), for video thumbnails
+- [comtypes](https://github.com/enthought/comtypes) for Windows Portable Devices (Windows only)
 - [PyInstaller](https://pyinstaller.org/) for the standalone build
 
 Each is under its own license. The standalone `.exe` bundles the Qt and FFmpeg binaries, so if you hand it to anyone else, include their license notices with it.

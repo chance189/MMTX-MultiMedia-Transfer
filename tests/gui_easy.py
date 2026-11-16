@@ -4,6 +4,7 @@ Usage: python tests/gui_easy.py <out_dir>"""
 from __future__ import annotations
 
 import os
+from datetime import datetime
 import sys
 import time
 
@@ -11,6 +12,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import gui_smoke as G  # noqa: E402  (sets offscreen platform, temp config/cache dirs)
 
 from PySide6.QtCore import Qt, QTimer  # noqa: E402
+from PySide6.QtWidgets import QLabel  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -106,7 +108,22 @@ def main() -> int:
     # 1. waiting for a card
     pump(20)
     grab(w, "easy_1_insert.png")
-    assert w.easy.title.text() == "Insert your camera card"
+    assert w.easy.title.text() == "What are you copying from?" and w.easy.devices.isVisible()
+    # tap a device: its own connection steps (memory card and USB-C), then back to all devices
+    for kind, title, shot in (("action", "Connect your GoPro", "easy_1b_guide_gopro.png"),
+                              ("cinema", "Connect your Sony camera", "easy_1c_guide_sony.png"),
+                              ("phone", "Connect your phone", "easy_1d_guide_phone.png"),
+                              ("360", "Connect your Insta360", "easy_1e_guide_insta360.png"),
+                              ("drone", "Connect your DJI drone", "easy_1f_guide_dji.png")):
+        w.easy.devices.tiles[kind].click()
+        pump(6)
+        assert w.easy.title.text() == title and w.easy.guide.isVisible(), w.easy.title.text()
+        assert w.easy.guide.row.count() == 2, "memory card + USB-C (or Android + iPhone)"
+        grab(w, shot)
+        w.easy._foot_actions[0]()  # "Pick a different device"
+        pump(2)
+        assert w.easy.title.text() == "What are you copying from?"
+    assert w.settings.easy_device == "drone" and w.easy.devices.tiles["drone"].last_used
     for key in PALETTES:
         w.easy.set_palette(key)
         pump(4)
@@ -139,6 +156,15 @@ def main() -> int:
     assert w.easy.title.text() == "Choose where to save your videos", "green moment holds the screen briefly"
     G.wait_until(app, lambda: w.easy.start.isVisible())
     assert w.easy.start.state == "todo"
+    # name this shoot: the default is there and selected, typing replaces it
+    nb = w.easy.name_box
+    assert nb.isVisible() and nb.edit.text() == "DailyRun", nb.edit.text()
+    pump(3)
+    assert nb.edit.selectedText() == "DailyRun", "default is selected so typing replaces it"
+    nb.edit.setText("Beach Run")
+    nb.edited.emit("Beach Run")
+    assert "2026_11_14_Beach_Run" in nb.preview.text(), nb.preview.text()
+    assert all(f.endswith("_Beach_Run") for _d, f in w.easy.plan)
     G.wait_until(app, lambda: not w.loader.inflight)
     pump(25)
     grab(w, "easy_3_ready.png")
@@ -160,11 +186,20 @@ def main() -> int:
     G.wait_until(app, lambda: not w.loader.inflight)
     pump(15)
     grab(w, "easy_pick_1_open.png")
-    total = sum(g.count() for _d, _f, g, _h in w.easy._pick_grids)
+    total = sum(g.count() for _d, _f, g, _h, _s in w.easy._pick_grids)
     assert len(w.easy._picked_clips()) == total == 24, (len(w.easy._picked_clips()), total)
     w.easy.p_none.click()
     assert not w.easy.p_go.isEnabled() and w.easy.p_go.btn.text() == "Choose at least one video"
-    _day, folder, grid, _h = w.easy._pick_grids[0]
+    # each day can have its own name: call Nov 13 "Hike"
+    from PySide6.QtWidgets import QLineEdit
+
+    _d13, _f13, _g13, head13, _s13 = next(e for e in w.easy._pick_grids if e[0].day.day == 13)
+    ed13 = head13.findChild(QLineEdit, "PickTitle")
+    assert ed13 is not None and ed13.text() == "Beach Run"
+    ed13.setText("Hike")
+    ed13.textEdited.emit("Hike")
+    assert any("2026_11_13_Hike" in lab.text() for lab in head13.findChildren(QLabel))
+    _day, folder, grid, _h, _s = w.easy._pick_grids[0]
     want = {"GX010002.MP4", "GX010003.MP4"}
     for i in range(grid.count()):
         if grid.item(i).data(ROLE)["name"] in want:
@@ -240,8 +275,9 @@ def main() -> int:
     dest = w.settings.offload_dest
     days = sorted(os.listdir(dest))
     print("day folders:", days)
-    assert len(days) == 6 and all(d.endswith("_DailyRun") for d in days)
-    d14 = os.path.join(dest, "2026_11_14_DailyRun")
+    assert len(days) == 6 and "2026_11_13_Hike" in days, days
+    assert all(d.endswith("_Beach_Run") for d in days if d != "2026_11_13_Hike"), days
+    d14 = os.path.join(dest, "2026_11_14_Beach_Run")
     assert os.path.isfile(os.path.join(d14, "GX010001.MP4")), "files go straight into the day folder"
     assert not any(os.path.isdir(os.path.join(d14, n)) for n in os.listdir(d14))
     assert os.path.exists(os.path.join(card, "DCIM", "100GOPRO", "GX010001.MP4")), "Copy everything never deletes"
@@ -336,6 +372,47 @@ def main() -> int:
     ez.set_palette("graphite")
     ez.stage.setCurrentWidget(ez.screen_view)
     ez.refresh()
+
+    # 9. a phone over USB (MTP): no drive letter, read through the device interface only
+    from mmtx import sources
+    from mmtx.ui import volumes as volmod
+
+    phone_dir = os.path.join(G.TMP, "phone")
+    cam = os.path.join(phone_dir, "DCIM", "Camera")
+    os.makedirs(cam)
+    today = datetime.now()
+    for i, n in enumerate((f"PXL_{today:%Y%m%d}_071500123.mp4", f"PXL_{today:%Y%m%d}_072000456.mp4",
+                           f"PXL_{today:%Y%m%d}_072300789.jpg")):
+        with open(os.path.join(cam, n), "wb") as f:
+            f.write(os.urandom(2_000_000 + i * 1000))
+    be = sources.DirBackend()
+    be.add("pix8", "Pixel 8", phone_dir, maker="Google")
+    sources.register_backend(be)
+    phone_vols = volmod._portable_volumes()
+    assert phone_vols and phone_vols[0].icon == "phone" and phone_vols[0].portable
+    w.set_easy(True)
+    w.easy.tab_copy.click()
+    pump(3)
+    w._on_volumes(drives + phone_vols)
+    G.wait_until(app, lambda: w.card_scan is not None and not w.scanning and w.card_root.startswith("portable://"))
+    G.wait_until(app, lambda: w.easy.start.isVisible())
+    pump(15)
+    assert "Pixel 8" in w.easy.chip.text and "over USB" in w.easy.chip.text, w.easy.chip.text
+    assert "last 30 days" in w.easy.sub.text(), w.easy.sub.text()
+    w.easy.name_box.edit.setText("Phone Clips")
+    w.easy.name_box.edited.emit("Phone Clips")
+    w.easy.start._t = 0.5
+    grab(w, "easy_phone_ready.png")
+    n_before = len(seen)
+    answers[:] = [0]
+    w.easy.start.btn.click()
+    G.wait_until(app, lambda: w.busy)
+    assert w.current_job.options.workers == 1, "USB devices copy one file at a time"
+    G.wait_until(app, lambda: not w.busy and len(seen) > n_before, timeout=120)
+    pdir = os.path.join(dest, f"{today:%Y_%m_%d}_Phone_Clips")
+    assert sorted(os.listdir(pdir))[:3] and len([n for n in os.listdir(pdir) if not n.startswith("_mmtx")]) == 3
+    assert len(os.listdir(cam)) == 3, "Copy everything never deletes from the phone"
+    sources.unregister_backend(be)
 
     # 7. a transfer started in Advanced shows up in Easy too
     w.set_easy(False)

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
+from .sources import is_portable, src_exists, src_open, src_remove, src_stat
 from .hashing import (
     CHUNK,
     Cancelled,
@@ -72,6 +73,7 @@ class FileTask:
     size: int
     rel: str  # path relative to group.dest_dir, forward slashes (manifest key)
     src_rel: Optional[str] = None  # key in the source folder's manifest
+    src_root: str = ""  # the card / device this file comes from (several in one job when copying all)
     status: str = "pending"  # copied | skipped | moved | failed | cancelled
     message: str = ""
     hash: str = ""
@@ -107,6 +109,9 @@ class JobOptions:
     retries: int = 1
     workers: int = 1  # files in flight at once
     workers_reason: str = ""
+    # several cards / devices in one job: at most this many files read at once from each source root
+    # (a phone over USB: 1, a card reader: 2, ...). Empty: one source, `workers` applies.
+    source_limits: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -258,6 +263,11 @@ def _copy_times(src: str, dst: str) -> None:
     """Carry over the camera's timestamps (NLEs and date grouping rely on them).
     Permission/read-only bits are deliberately not copied."""
     try:
+        if is_portable(src):
+            st = src_stat(src)
+            if st.st_mtime > 0:
+                os.utime(lp(dst), (st.st_mtime, st.st_mtime))
+            return
         st = os.stat(lp(src))
         os.utime(lp(dst), ns=(st.st_atime_ns, st.st_mtime_ns))
     except OSError:
@@ -479,8 +489,14 @@ class TransferRunner(RunnerBase):
     def _copy_small(self, src: str, dst: str, algo: str) -> str:
         """Files up to a couple of chunks: one read, one write, no helper thread."""
         h = new_hasher(algo)
-        with open(lp(src), "rb", buffering=0) as f:
-            data = f.read()
+        with src_open(src) as f:
+            chunks = []
+            while True:  # a device stream may return less than asked
+                b = f.read(SMALL_FILE + 1)
+                if not b:
+                    break
+                chunks.append(b)
+            data = b"".join(chunks)
         h.update(data)
         fd = os.open(lp(dst), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o666)
         with os.fdopen(fd, "wb", buffering=0) as out:
@@ -509,7 +525,7 @@ class TransferRunner(RunnerBase):
 
         def reader() -> None:
             try:
-                with open(lp(src), "rb", buffering=0) as f:
+                with src_open(src) as f:
                     while not stop.is_set():
                         b = f.read(CHUNK)
                         if not b:
@@ -564,7 +580,7 @@ class TransferRunner(RunnerBase):
         self._tl.spent = 0
         partial = ""
         try:
-            st = os.stat(lp(t.src))
+            st = src_stat(t.src)
             t.size = st.st_size
             budget = t.size * self.mult
             final = t.dst
@@ -621,7 +637,7 @@ class TransferRunner(RunnerBase):
                 self.result.errors.append(f"{g.name}/{t.rel}: checksum mismatch after retry")
                 return
 
-            st2 = os.stat(lp(t.src))
+            st2 = src_stat(t.src)
             if st2.st_size != st.st_size or st2.st_mtime_ns != st.st_mtime_ns:
                 os.remove(lp(partial))
                 partial = ""
@@ -644,8 +660,9 @@ class TransferRunner(RunnerBase):
             self.log("error", f"FAIL  {t.rel}: {e}")
             if e.errno == errno.ENOSPC:
                 raise DiskFull(str(e))
-            if g.source_root and not os.path.exists(lp(g.source_root)):
-                raise SourceGone(g.source_root)
+            root = t.src_root or g.source_root
+            if root and not src_exists(root if is_portable(root) else lp(root)):
+                raise SourceGone(root)
         finally:
             if partial:
                 try:
@@ -681,6 +698,9 @@ class TransferRunner(RunnerBase):
 
     # ---- all files of one group ----
     def _run_tasks(self, g: Group) -> None:
+        limits = self.opt.source_limits
+        if limits and len({t.src_root for t in g.tasks}) > 1:
+            return self._run_tasks_multi(g, limits)
         if self.workers == 1:
             for t in g.tasks:
                 if self._stopping():
@@ -700,6 +720,67 @@ class TransferRunner(RunnerBase):
                 self._emit_file(g, t)
         finally:
             ex.shutdown(wait=True, cancel_futures=True)
+        if self.abort_exc is not None:
+            raise self.abort_exc
+        if self.cancel_event.is_set():
+            raise Cancelled()
+
+    def _run_tasks_multi(self, g: Group, limits: dict) -> None:
+        """Files from several cards/devices: each worker takes the next file from a source that still has a
+        free read slot, so two card readers copy side by side while a phone stays at one file at a time."""
+        queues: dict[str, deque] = {}
+        for t in g.tasks:
+            queues.setdefault(t.src_root, deque()).append(t)
+        running = {r: 0 for r in queues}
+        order = list(queues)
+        cond = threading.Condition()
+        finished: "queue.Queue[FileTask]" = queue.Queue()
+        n_workers = max(1, min(self.workers, sum(max(1, int(limits.get(r, 1))) for r in queues)))
+
+        def take() -> Optional[FileTask]:
+            with cond:
+                while True:
+                    if self._stopping():
+                        return None
+                    for i in range(len(order)):  # rotate so no source starves
+                        r = order[0]
+                        order.append(order.pop(0))
+                        if queues[r] and running[r] < max(1, int(limits.get(r, 1))):
+                            running[r] += 1
+                            return queues[r].popleft()
+                    if not any(queues.values()):
+                        return None
+                    cond.wait(0.2)
+
+        def work() -> None:
+            while True:
+                t = take()
+                if t is None:
+                    return
+                try:
+                    self._process(g, t)
+                except Cancelled:
+                    pass
+                except BaseException as exc:  # noqa: BLE001
+                    if self.abort_exc is None:
+                        self.abort_exc = exc
+                        self.abort_event.set()
+                finally:
+                    with cond:
+                        running[t.src_root] -= 1
+                        cond.notify_all()
+                    finished.put(t)
+
+        threads = [threading.Thread(target=work, name=f"mmtx-copy-{i}", daemon=True) for i in range(n_workers)]
+        for th in threads:
+            th.start()
+        while any(th.is_alive() for th in threads) or not finished.empty():
+            try:
+                self._emit_file(g, finished.get(timeout=0.1))
+            except queue.Empty:
+                pass
+        for th in threads:
+            th.join()
         if self.abort_exc is not None:
             raise self.abort_exc
         if self.cancel_event.is_set():
@@ -752,12 +833,15 @@ class TransferRunner(RunnerBase):
         failed = []
         for t in g.tasks:
             try:
-                _remove(lp(t.src))
+                if is_portable(t.src):
+                    src_remove(t.src)
+                else:
+                    _remove(lp(t.src))
             except FileNotFoundError:
                 pass
             except OSError as e:
                 failed.append(f"{t.src}: {e.strerror or e}")
-        if g.prune_source_dir and g.source_dir:
+        if g.prune_source_dir and g.source_dir and not is_portable(g.source_dir):
             for root, dirs, files in os.walk(lp(g.source_dir), topdown=False):
                 for f in files:
                     if is_junk(f) or is_manifest(f):

@@ -193,6 +193,15 @@ def _chunk_for(path: str, chunk: int) -> int:
 
 def iter_file(path: str, uncached: bool = True, chunk: int = CHUNK) -> Iterator[memoryview]:
     """Yield the file's bytes, bypassing the OS cache when asked and possible."""
+    from .sources import is_portable, src_open
+
+    if is_portable(path):  # a phone or GoPro over USB: stream it from the device
+        with src_open(path) as f:
+            while True:
+                b = f.read(chunk)
+                if not b:
+                    return
+                yield memoryview(b)
     chunk = _chunk_for(path, chunk)
     if uncached and sys.platform == "win32":
         try:

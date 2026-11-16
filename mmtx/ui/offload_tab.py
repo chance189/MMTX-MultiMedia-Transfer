@@ -7,6 +7,7 @@ so a transfer started in Easy mode shows up here live as well.
 from __future__ import annotations
 
 import os
+import time
 from collections import Counter
 from typing import Optional
 
@@ -31,6 +32,7 @@ from ..planner import (
     day_presence,
     existing_day_folders,
     is_inside,
+    merge_offload_jobs,
     plan_offload,
     sanitize,
     title_from_existing,
@@ -185,6 +187,7 @@ class OffloadPage(QWidget):
         self.sections: list[DaySection] = []
         self.src_index: dict = {}
         self.key_index: dict = {}
+        self._readback = True
         self._live: dict[str, tuple[str, float]] = {}  # src -> (status, progress) of the running job
         self.loader.ready.connect(self._thumb_ready)
 
@@ -273,12 +276,21 @@ class OffloadPage(QWidget):
             cb.toggled.connect(self._options_changed)
             bottom.addWidget(cb)
         bottom.addStretch(1)
+        self.go_all = button("Offload all cards", "AllCards", slot=self._start_all, icon_name="offload",
+                             icon_color="#ffffff")
+        self.go_all.setMinimumWidth(240)
+        self.go_all.setToolTip("Copy the new days from every connected card and device in one go.\n"
+                               "This card uses the days and titles chosen here; the others use their new days\n"
+                               "with the default title. Same-day files share one day folder; devices copy side by side.")
+        self.go_all.setVisible(False)
+        bottom.addWidget(self.go_all)
         self.go = button("Offload", "Primary", slot=self._start, icon_name="offload", icon_color="#ffffff")
         self.go.setMinimumWidth(270)
         bottom.addWidget(self.go)
         root.addLayout(bottom)
 
         host.busy_changed.connect(lambda _b: self._update_go())
+        host.cards_changed.connect(self._update_go)
         host.card_scanning.connect(self._card_scanning)
         host.card_changed.connect(self._card_changed)
         host.job_started.connect(self._job_started)
@@ -499,6 +511,74 @@ class OffloadPage(QWidget):
         self.go.setText(f"  Offload {n} day{'s' if n != 1 else ''}   ·   {human_bytes(size)}" if n else "  Offload")
         self.sel_info.setText(f"{n} of {len(self.sections)} days selected" if self.sections else "")
         self.go.setEnabled(bool(n) and bool(self.dest.path()) and not self.host.busy)
+        others = self._other_cards()
+        multi = bool(others) and (bool(n) or len(others) >= 2)
+        self.go_all.setVisible(multi)
+        if multi:
+            k = len(others) + (1 if n else 0)
+            size_all = size + sum(e.new_bytes for e in others)
+            self.go_all.setText(f"  Offload all {k} cards   ·   {human_bytes(size_all)}")
+            self.go_all.setEnabled(bool(self.dest.path()) and not self.host.busy)
+
+    def _other_cards(self) -> list:
+        """Other connected cards/devices that have something new."""
+        here = self.scan.root if self.scan else ""
+        return [e for e in self.host.ready_cards() if e.root != here and e.new_files]
+
+    def _default_selections(self, scan, dest: str, opts) -> list:
+        """New days of a card that isn't on screen: existing day folders keep their title, others get the default."""
+        existing = existing_day_folders(dest) if os.path.isdir(dest) else {}
+        dev = device_folders(self.s, scan)
+        out = []
+        for day in scan.days:
+            title = title_from_existing(existing[day.day][0]) if day.day in existing else self.default_title.text()
+            folder = day_folder_name(day.day, title or self.s.default_title, self.s.spaces_to_underscores)
+            present, total, _ = day_presence(day, os.path.join(dest, folder), dev, opts)
+            if present < total:
+                out.append((day, folder))
+        return out
+
+    def _start_all(self) -> None:
+        dest = self.dest.path()
+        if not dest:
+            return
+        cards = ([self.host.cards[self.scan.root]] if self.scan and self.scan.root in self.host.cards else []) \
+            + self._other_cards()
+        if any(not e.portable and is_inside(dest, e.root) for e in cards):
+            QMessageBox.warning(self, "Destination is on a card", "Pick a working drive that is not one of the cards.")
+            return
+        try:
+            os.makedirs(dest, exist_ok=True)
+        except OSError as e:
+            QMessageBox.critical(self, "Cannot use destination", f"{dest}\n\n{e}")
+            return
+        opts = self._opts()
+        jobs = []
+        for e in cards:
+            if self.scan is not None and e.root == self.scan.root:
+                sel = [(s.day, self._folder(s)) for s in self.selected()]
+            else:
+                sel = self._default_selections(e.scan, dest, opts)
+            if sel:
+                j = plan_offload(e.scan, sel, dest, device_folders(self.s, e.scan), opts)
+                if j.groups:
+                    jobs.append(j)
+        if not jobs:
+            return
+        if opts.delete_source:
+            ans = QMessageBox.question(
+                self, "Delete from cards after verify?",
+                f"Files will be deleted from all {len(jobs)} cards/devices after their checksums verify on the "
+                "working drive.\nDays with any problem are left untouched.\n\nContinue?")
+            if ans != QMessageBox.Yes:
+                return
+        roots = [j.groups[0].source_root for j in jobs]
+        job = merge_offload_jobs(jobs, self.host.source_limits(roots, dest)) if len(jobs) > 1 else jobs[0]
+        if not self.host.preflight(job, dest):
+            return
+        if len(jobs) == 1:
+            self.host.resolve_workers(job, roots[0], dest)
+        self.host.run_transfer(job)
 
     # ================================================================ start
     def _start(self) -> None:
@@ -535,6 +615,7 @@ class OffloadPage(QWidget):
         if job.kind != "offload":
             return
         self._live = {t.src: ("queued", 0.0) for g in job.groups for t in g.tasks}
+        self._readback = bool(getattr(job.options, "verify_readback", True))
         self._apply_live()
 
     def _apply_live(self) -> None:
@@ -546,7 +627,7 @@ class OffloadPage(QWidget):
             if hit:
                 sec, it = hit
                 info = it.data(ROLE)
-                info["status"], info["progress"] = status, prog
+                info["status"], info["progress"], info["frac"] = status, prog, prog
                 touched.add(sec)
         for sec in touched:
             sec.grid.viewport().update()
@@ -559,7 +640,9 @@ class OffloadPage(QWidget):
         if hit:
             sec, it = hit
             info = it.data(ROLE)
-            info["status"], info["progress"] = status, prog
+            if status in ("copied", "skipped") and info.get("status") not in ("copied", "skipped"):
+                info["done_at"] = time.monotonic()  # the green outline flashes for a few seconds
+            info["status"], info["progress"], info["frac"] = status, prog, prog
             sec.grid.refresh(it)
 
     def _job_event(self, kind: str, p: dict) -> None:
@@ -568,8 +651,12 @@ class OffloadPage(QWidget):
         if kind == "progress":
             for slot in p.get("active", ()):
                 tot = slot.get("file_total") or 0
-                self._set_live(slot.get("src", ""), PHASE_STATUS.get(slot.get("phase", ""), "copying"),
-                               slot.get("file_done", 0) / tot if tot else 0.0)
+                part = slot.get("file_done", 0) / tot if tot else 0.0
+                phase = slot.get("phase", "")
+                # one number for copy + read-back check, so "almost done" is the real last stretch
+                frac = (part * 0.5 if self._readback else part) if phase == "Copying" else (
+                    0.5 + 0.5 * part if phase == "Verifying" else part)
+                self._set_live(slot.get("src", ""), PHASE_STATUS.get(phase, "copying"), frac)
         elif kind == "file":
             self._set_live(p.get("src", ""), FINAL_STATUS.get(p.get("status", ""), ""), 1.0)
 

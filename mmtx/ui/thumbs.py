@@ -95,8 +95,11 @@ class ThumbLoader(QObject):
         if k:
             return k
         try:
-            st = os.stat(path)
-            raw = f"{os.path.abspath(path)}|{st.st_size}|{st.st_mtime_ns}"
+            if path.startswith("portable://"):
+                raw = path
+            else:
+                st = os.stat(path)
+                raw = f"{os.path.abspath(path)}|{st.st_size}|{st.st_mtime_ns}"
         except OSError:
             raw = os.path.abspath(path)
         k = hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:24]

@@ -107,13 +107,42 @@ def plan_offload(
         )
         for f in offload_files(day, opts):
             rel = _offload_rel(f, device_folders, opts)
-            g.tasks.append(FileTask(src=f.path, dst=os.path.join(dest_dir, *rel.split("/")), size=f.size, rel=rel))
+            g.tasks.append(FileTask(src=f.path, dst=os.path.join(dest_dir, *rel.split("/")), size=f.size, rel=rel,
+                                    src_root=scan.root))
         if g.tasks:
             groups.append(g)
     n = len(groups)
     title = f"Offload {n} day{'s' if n != 1 else ''} from {scan.root}"
     return Job("offload", title, groups, JobOptions(verify_readback=opts.verify_readback, uncached=opts.uncached,
                                                      workers=opts.workers, workers_reason=opts.workers_reason))
+
+
+def merge_offload_jobs(jobs: list[Job], source_limits: dict[str, int], max_workers: int = 6) -> Job:
+    """One job from several cards/devices: files from the same shooting day land in the same day folder
+    (one group per folder, so name clashes and the checksum file are handled in one place), and files
+    from different devices are copied side by side, each device within its own limit."""
+    if len(jobs) == 1:
+        return jobs[0]
+    merged: dict[tuple[str, bool], Group] = {}
+    for job in jobs:
+        for g in job.groups:
+            k = (os.path.normcase(os.path.abspath(g.dest_dir)), g.delete_source)
+            m = merged.get(k)
+            if m is None:
+                m = merged[k] = Group(name=g.name, dest_dir=g.dest_dir, algo=g.algo, source_root=g.source_root,
+                                      delete_source=g.delete_source)
+            elif m.source_root != g.source_root:
+                m.source_root = ""  # several sources: each task carries its own root
+            m.tasks.extend(g.tasks)
+    groups = sorted(merged.values(), key=lambda g: g.name, reverse=True)
+    opts = jobs[0].options
+    limits = {r: max(1, int(n)) for r, n in source_limits.items()}
+    workers = max(1, min(max_workers, sum(limits.values()) or 1))
+    options = JobOptions(verify_readback=opts.verify_readback, uncached=opts.uncached, retries=opts.retries,
+                         workers=workers, workers_reason=f"{len(jobs)} devices side by side",
+                         source_limits=limits)
+    n = len(groups)
+    return Job("offload", f"Offload {n} day{'s' if n != 1 else ''} from {len(jobs)} devices", groups, options)
 
 
 # ---------------------------------------------------------------- archive

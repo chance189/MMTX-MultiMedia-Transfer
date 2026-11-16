@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QPlainTextEdit,
     QScrollArea,
+    QSpinBox,
     QTableWidget,
     QVBoxLayout,
     QWidget,
@@ -274,6 +275,21 @@ class SettingsDialog(QDialog):
 
         from .palettes import PALETTES
 
+        ph = Card("Phones")
+        row = QHBoxLayout()
+        row.addWidget(label("Show phone videos from the last", "Hint"))
+        self.phone_days = QSpinBox()
+        self.phone_days.setRange(0, 3650)
+        self.phone_days.setSpecialValueText("all days")
+        self.phone_days.setSuffix(" days")
+        self.phone_days.setValue(s.phone_recent_days)
+        row.addWidget(self.phone_days)
+        row.addStretch(1)
+        ph.body.addLayout(row)
+        ph.body.addWidget(label("A phone holds years of photos. Over USB, MMTX reads only its camera folder (DCIM) "
+                                "and shows this many recent days. 0 shows everything.", "Hint", wrap=True))
+        lay.addWidget(ph)
+
         ez = Card("Easy mode colors")
         self.palette = QComboBox()
         for k, pal in PALETTES.items():
@@ -311,5 +327,6 @@ class SettingsDialog(QDialog):
         self.s.workers = int(self.workers.currentData())
         self.s.thumbnails = self.thumbs.isChecked()
         self.s.easy_palette = self.palette.currentData()
+        self.s.phone_recent_days = self.phone_days.value()
         self.s.save()
         self.accept()

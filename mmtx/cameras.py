@@ -11,7 +11,9 @@ Card layouts handled:
   Sony       PRIVATE/M4ROOT/CLIP/C0001.MP4 + C0001M01.XML (date + model, e.g. ILME-FX3)
              PRIVATE/M4ROOT/SUB/C0001S03.MP4 (proxy), THMBNL/C0001T01.JPG
              DCIM/100MSDCF/DSC00001.ARW
-  Generic    anything else with a media extension (phones, other cameras)
+  Phone      DCIM/Camera/PXL_20251114_063012123.mp4, 20251114_063012.mp4 (Samsung),
+             DCIM/100APPLE/IMG_0001.MOV (iPhone)
+  Generic    anything else with a media extension (other cameras)
 """
 
 from __future__ import annotations
@@ -36,8 +38,13 @@ PROFILE_NAMES = {
     "dji": "DJI",
     "insta360": "Insta360",
     "sony": "Sony",
+    "phone": "Phone",
     "generic": "Camera",
 }
+
+# profile -> icon family (drawn in ui/icons.py)
+PROFILE_KIND = {"gopro": "action", "dji": "drone", "insta360": "360", "sony": "cinema", "phone": "phone",
+                "generic": "card"}
 
 _GOPRO_DIR = re.compile(r"^\d{3}(GOPRO|GBACK|GFRNT)$", re.I)
 _GOPRO_CHAPTER = re.compile(r"^(G[A-Z])(\d{2})(\d{4})(\.[A-Za-z0-9]+)$", re.I)
@@ -49,7 +56,9 @@ _INSTA_DIR = re.compile(r"^Camera\d{2}$", re.I)
 _INSTA_NAME = re.compile(r"^(?:VID|IMG|LRV|PRO_VID|PRO_LRV|PRO_IMG)_(\d{8})_(\d{6})_(\d{2})_(\d{3})", re.I)
 _SONY_DIR = re.compile(r"^\d{3}MSDCF$", re.I)
 _SONY_CLIP = re.compile(r"^(C\d{4})", re.I)
-_PHONE_TS = re.compile(r"^(?:PXL|IMG|VID|MVIMG)_(\d{8})_(\d{6})", re.I)
+_PHONE_TS = re.compile(r"^(?:PXL|IMG|VID|MVIMG|LMC|Screenrecorder)[_-](\d{8})[_-](\d{6})", re.I)
+_SAMSUNG_TS = re.compile(r"^(\d{8})_(\d{6})")
+_PHONE_DIR = re.compile(r"^(Camera|\d{3}APPLE|\d{3}_\d{4}|\d{3}CANON)$", re.I)
 _SONY_DATE = re.compile(r'<CreationDate\s+value="([^"]+)"')
 _SONY_MODEL = re.compile(r'<Device\s+[^>]*modelName="([^"]+)"')
 _GOPRO_MODEL = re.compile(r'"camera type"\s*:\s*"([^"]+)"', re.I)
@@ -99,6 +108,9 @@ def classify(rel: str) -> str:
         _INSTA_NAME.match(name) and ext in (".lrv", ".mp4", ".dng", ".jpg")
     ):
         return "insta360"
+    if (len(up) >= 3 and up[0] == "DCIM" and (dirs[1] == "Camera" or re.match(r"^\d{3}APPLE$", up[1])
+                                              or re.match(r"^\d{3}_\d{4}$", up[1]))) or _PHONE_TS.match(name):
+        return "phone"
     return "generic"
 
 
@@ -193,7 +205,9 @@ def capture_time(profile: str, path: str, rel: str, mtime: float) -> datetime:
     elif profile == "sony":
         stem, ext = os.path.splitext(name)
         xml = None
-        if ext.lower() == ".xml":
+        if path.startswith("portable://"):
+            xml = None  # don't open sidecars over USB just for a date
+        elif ext.lower() == ".xml":
             xml = path
         else:
             m = _SONY_CLIP.match(name)
@@ -205,13 +219,13 @@ def capture_time(profile: str, path: str, rel: str, mtime: float) -> datetime:
             dt, _ = _parse_sony_xml(xml)
             if dt:
                 return dt
-    elif profile == "generic":
-        m = _PHONE_TS.match(name)
+    elif profile in ("phone", "generic"):
+        m = _PHONE_TS.match(name) or _SAMSUNG_TS.match(name)
         if m:
             dt = _ts(m.group(1), m.group(2))
             if dt:
                 return dt
-    return datetime.fromtimestamp(mtime)
+    return datetime.fromtimestamp(mtime) if mtime > 0 else datetime.now()
 
 
 def gopro_sorted_name(name: str) -> str:
@@ -228,20 +242,24 @@ def gopro_sorted_name(name: str) -> str:
 
 def _find_ci(root: str, *parts: str) -> Optional[str]:
     """Case-insensitive path lookup (FAT/exFAT cards mounted on Linux can differ in case)."""
+    from . import sources
+
     cur = root
     for p in parts:
         try:
-            names = os.listdir(cur)
+            names = sources.listdir(cur)
         except OSError:
             return None
         match = next((n for n in names if n.lower() == p.lower()), None)
         if match is None:
             return None
-        cur = os.path.join(cur, match)
+        cur = sources.join(cur, match)
     return cur
 
 
 def gopro_model(root: str) -> Optional[str]:
+    if root.startswith("portable://"):
+        return None
     p = _find_ci(root, "MISC", "version.txt")
     if not p:
         return None
@@ -279,13 +297,15 @@ def sony_model(xml_path: str) -> Optional[str]:
 
 def card_signature(root: str) -> Optional[str]:
     """Quick, cheap guess of what camera a volume came out of (for the drive picker)."""
+    from . import sources
+
     dcim = _find_ci(root, "DCIM")
     if _find_ci(root, "PRIVATE", "M4ROOT"):
         return "Sony"
     if not dcim:
         return None
     try:
-        subs = os.listdir(dcim)
+        subs = sources.listdir(dcim)
     except OSError:
         return "Camera"
     if any(_GOPRO_DIR.match(s) for s in subs):
@@ -296,4 +316,6 @@ def card_signature(root: str) -> Optional[str]:
         return "Insta360"
     if any(_SONY_DIR.match(s) for s in subs):
         return "Sony"
+    if any(_PHONE_DIR.match(s) for s in subs):
+        return "Phone"
     return "Camera"

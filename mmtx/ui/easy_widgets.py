@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .icons import draw_check, draw_cross, draw_glyph
+from .icons import draw_device, draw_check, draw_cross, draw_glyph
 
 from .easy_clips import (
     done_flashing,
@@ -292,6 +292,7 @@ class Art(QWidget):
         super().__init__(parent)
         self.setFixedSize(420, 210)
         self.kind = "insert"
+        self.device = ""  # device icon family for "device" / "search" (empty: a memory card)
         self.folder_names: list[str] = []
         self._t = 0.0
         self._confetti: list[list[float]] = []
@@ -340,8 +341,18 @@ class Art(QWidget):
         k = self.kind
         if k == "insert":
             self._paint_insert(p, W, H)
+        elif k == "device":
+            c = QPointF(W / 2, H / 2)
+            p.setPen(Qt.NoPen)
+            p.setBrush(ink(10))
+            p.drawEllipse(c, 98, 98)
+            draw_device(p, self.device or "card", QRectF(W / 2 - 70, H / 2 - 70, 140, 140), P.text, width=1.4,
+                        fill_alpha=36)
         elif k == "search":
-            draw_sd_card(p, QRectF(W / 2 - 36, H / 2 - 48, 72, 96))
+            if self.device and self.device != "card":
+                draw_device(p, self.device, QRectF(W / 2 - 48, H / 2 - 48, 96, 96), P.text, width=1.4, fill_alpha=36)
+            else:
+                draw_sd_card(p, QRectF(W / 2 - 36, H / 2 - 48, 72, 96))
             arc = QRectF(W / 2 - 82, H / 2 - 82, 164, 164)
             g = QConicalGradient(arc.center(), -self._t * 360)
             g.setColorAt(0, QColor(P.busy))

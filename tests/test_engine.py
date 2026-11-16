@@ -19,6 +19,7 @@ from mmtx.planner import (  # noqa: E402
     OffloadOptions,
     day_folder_name,
     day_presence,
+    merge_offload_jobs,
     plan_archive,
     plan_offload,
 )
@@ -421,6 +422,158 @@ def test_per_camera_subfolders_opt_in():
         assert os.path.exists(os.path.join(d14, "Sony_FX3", "C0001.MP4"))
     finally:
         shutil.rmtree(tmp)
+
+
+def _fake_phone(folder: str) -> None:
+    """A phone camera roll: Pixel, Samsung and iPhone style names, two days, one clip 40 days old."""
+    import datetime as _dt
+
+    cam = os.path.join(folder, "DCIM", "Camera")
+    os.makedirs(cam)
+    os.makedirs(os.path.join(folder, "Android", "data", "junk"))
+    with open(os.path.join(folder, "Android", "data", "junk", "cache.bin"), "wb") as f:
+        f.write(b"x" * 1000)
+    today = _dt.datetime.now()
+    old = today - _dt.timedelta(days=40)
+    names = [f"PXL_{today:%Y%m%d}_063012123.mp4", f"PXL_{today:%Y%m%d}_064500456.jpg",
+             f"{(today - _dt.timedelta(days=1)):%Y%m%d}_181500.mp4", f"PXL_{old:%Y%m%d}_120000000.mp4"]
+    for i, n in enumerate(names):
+        with open(os.path.join(cam, n), "wb") as f:
+            f.write(os.urandom(300_000 + i * 70_001) if n.endswith(".mp4") else os.urandom(40_000))
+
+
+def test_portable_phone_copy_verify_delete():
+    """A phone over USB (MTP): no file paths, only the device interface. Scan, copy with read-back
+    verify, delete from the phone only after the check; files outside DCIM are never touched."""
+    from mmtx import sources
+
+    tmp = tempfile.mkdtemp(prefix="mmtx_test_")
+    try:
+        phone_dir = os.path.join(tmp, "phone")
+        _fake_phone(phone_dir)
+        work = os.path.join(tmp, "work")
+        os.makedirs(work)
+        be = sources.DirBackend()
+        be.add("pix8", "Pixel 8", phone_dir, maker="Google")
+        sources.register_backend(be)
+        roots = sources.portable_roots()
+        assert [r[0] for r in roots] == ["portable://pix8/Internal shared storage"], roots
+        root = roots[0][0]
+        assert sources.device_of(root).kind == "phone"
+
+        scan_all = scan_card(root)
+        assert {f.profile for f in scan_all.files} == {"phone"}, {f.rel for f in scan_all.files}
+        assert not any("Android" in f.rel for f in scan_all.files), "only DCIM is read on a phone"
+        assert scan_all.devices == {"phone": "Pixel 8"}
+        scan = scan_card(root, phone_days=30)
+        assert len(scan.files) == 3 and len(scan.days) == 2, [f.name for f in scan.files]
+
+        opts = OffloadOptions(algo="xxh128", workers=1, delete_source=True)
+        sel = [(d, day_folder_name(d.day, "Phone")) for d in scan.days]
+        job = plan_offload(scan, sel, work, {"phone": "Pixel_8"}, opts)
+        assert all(t.src.startswith("portable://") for g in job.groups for t in g.tasks)
+        res = TransferRunner(job).run()
+        assert res.ok and res.files_ok == 3, (res.errors, res.warnings)
+        for g in job.groups:
+            _independent_check(g.dest_dir)
+            for t in g.tasks:
+                assert not sources.src_exists(t.src), "verified files are removed from the phone"
+        left = sorted(os.listdir(os.path.join(phone_dir, "DCIM", "Camera")))
+        assert len(left) == 1 and "120000000" in left[0], left  # the old clip was not part of the job
+        assert os.path.exists(os.path.join(phone_dir, "Android", "data", "junk", "cache.bin"))
+
+        # unplugging mid-way: the device's files can no longer be opened
+        be.unplug("pix8")
+        sources.refresh_devices()
+        assert not sources.src_exists(root)
+        sources.unregister_backend(be)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_multi_device_offload_side_by_side():
+    """Two card readers and a phone in one job: same-day files share one day folder, clashing GoPro names
+    are both kept, the phone never reads two files at once, the cards do run side by side, everything verifies."""
+    import datetime as _dt
+
+    from mmtx import sources
+    from mmtx.transfer import TransferRunner as TR
+
+    tmp = tempfile.mkdtemp(prefix="mmtx_test_")
+    try:
+        work = os.path.join(tmp, "work")
+        os.makedirs(work)
+        day = _dt.datetime(2026, 11, 14, 7)
+        cards = []
+        for n in (1, 2):  # two GoPro cards: GX010001.MP4 on both, different content
+            root = os.path.join(tmp, f"gopro{n}")
+            d = os.path.join(root, "DCIM", "100GOPRO")
+            os.makedirs(d)
+            for i in range(1, 7):
+                p = os.path.join(d, f"GX01{i:04d}.MP4")
+                with open(p, "wb") as f:
+                    f.write(os.urandom(400_000 + n * 1000 + i))
+                ts = (day + _dt.timedelta(minutes=i)).timestamp()
+                os.utime(p, (ts, ts))
+            cards.append(root)
+        phone_dir = os.path.join(tmp, "phone")
+        cam = os.path.join(phone_dir, "DCIM", "Camera")
+        os.makedirs(cam)
+        for i in range(4):
+            with open(os.path.join(cam, f"PXL_{day:%Y%m%d}_07{i:02d}00000.mp4"), "wb") as f:
+                f.write(os.urandom(300_000 + i))
+        be = sources.DirBackend()
+        be.add("ph", "Pixel 8", phone_dir, maker="Google")
+        sources.register_backend(be)
+        roots = cards + ["portable://ph/Internal shared storage"]
+
+        jobs = []
+        for r in roots:
+            scan = scan_card(r)
+            opts = OffloadOptions(algo="xxh128")
+            sel = [(d, day_folder_name(d.day, "Shoot")) for d in scan.days]
+            jobs.append(plan_offload(scan, sel, work, {}, opts))
+        limits = {cards[0]: 2, cards[1]: 2, roots[2]: 1}
+        job = merge_offload_jobs(jobs, limits)
+        assert len(job.groups) == 1 and job.groups[0].name == "2026_11_14_Shoot", [g.name for g in job.groups]
+        assert len(job.groups[0].tasks) == 16 and job.options.workers == 5
+
+        active: dict[str, int] = {}
+        peak: dict[str, int] = {}
+        peak_total = [0]
+        lock = threading.Lock()
+        orig = TR._copy_hash
+
+        def spy(self, src, dst, algo, size):
+            root = next(r for r in roots if src.startswith(r))
+            with lock:
+                active[root] = active.get(root, 0) + 1
+                peak[root] = max(peak.get(root, 0), active[root])
+                peak_total[0] = max(peak_total[0], sum(active.values()))
+            try:
+                time.sleep(0.03)  # long enough for overlap to show
+                return orig(self, src, dst, algo, size)
+            finally:
+                with lock:
+                    active[root] -= 1
+
+        TR._copy_hash = spy
+        try:
+            res = TransferRunner(job).run()
+        finally:
+            TR._copy_hash = orig
+        assert res.ok and res.files_ok == 16, (res.errors, res.warnings)
+        assert peak[roots[2]] == 1, "a phone over USB reads one file at a time"
+        assert peak[cards[0]] <= 2 and peak[cards[1]] <= 2, peak
+        assert peak_total[0] >= 3, f"devices should copy side by side, peak {peak_total[0]}"
+        folder = job.groups[0].dest_dir
+        names = sorted(os.listdir(folder))
+        assert "GX010001.MP4" in names and "GX010001_1.MP4" in names, names
+        entries = _independent_check(folder)
+        assert len(entries) == 16
+        sources.unregister_backend(be)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_hash_paths_agree():

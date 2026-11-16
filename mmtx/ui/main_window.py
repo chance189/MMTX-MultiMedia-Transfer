@@ -18,7 +18,9 @@ from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMessageBox, QStackedWid
 from .. import APP_NAME
 from ..drives import auto_workers, drive_info
 from ..hashing import ALGORITHMS
+from .. import sources
 from ..scanner import CardScan, scan_card
+from .session import CardEntry, source_limit, summarize
 from ..settings import Settings, logs_dir
 from ..transfer import Job, JobResult, TransferRunner, estimate_needed_bytes, free_bytes, human_bytes
 from .archive_tab import ArchiveTab
@@ -39,7 +41,8 @@ FAT_LIMIT = 4 * 1024**3 - 1
 class MainWindow(QMainWindow):
     busy_changed = Signal(bool)
     card_scanning = Signal(str)  # root being scanned
-    card_changed = Signal(object)  # CardScan or None
+    card_changed = Signal(object)  # CardScan or None (the selected card)
+    cards_changed = Signal()  # any card/device: added, read, removed, copying progress
     job_started = Signal(object)  # Job
     job_event = Signal(str, dict)  # progress / file / group / log ...
     job_finished = Signal(object)  # JobResult
@@ -55,12 +58,10 @@ class MainWindow(QMainWindow):
         self.card_scan: Optional[CardScan] = None
         self.card_root = ""
         self.card_note = ""  # "", "empty", "unreadable", "removed"
-        self.scanning = False
+        self.cards: dict[str, CardEntry] = {}  # every connected card / device, in the order they came in
         self.current_job: Optional[Job] = None
         self._scan_worker: Optional[Worker] = None
-        self._pending_scan: Optional[str] = None
-        self._seen_roots: set = set()
-        self._first_volumes = True
+        self._job_roots: dict[str, str] = {}  # src path -> card root, while a job runs
 
         self.setWindowTitle(f"{APP_NAME}  ·  MultiMedia Transfer")
         self.resize(1440, 900)
@@ -106,6 +107,8 @@ class MainWindow(QMainWindow):
         self.sidebar.card_clicked.connect(self._card_clicked)
         self.sidebar.easy_clicked.connect(lambda: self.set_easy(True))
         self.watcher.changed.connect(self._on_volumes)
+        self.cards_changed.connect(lambda: self.sidebar.set_card_statuses(self.cards))
+        self.job_event.connect(self._track_job_event)
         self.offload.dest_changed.connect(lambda _p: self.update_drives())
 
         self._update_mode()
@@ -137,54 +140,152 @@ class MainWindow(QMainWindow):
         self.update_drives()
 
     # ---------------------------------------------------------------- cards (shared by both views)
+    @property
+    def scanning(self) -> bool:
+        """The selected card is still being read."""
+        e = self.cards.get(self.card_root)
+        return e is not None and e.state in ("waiting", "scanning")
+
     def _on_volumes(self, vols: list) -> None:
         self.volumes = list(vols)
         self.sidebar.set_volumes(vols)
-        cams = [v for v in vols if v.camera]
-        roots = {v.root for v in cams}
-        new = [v for v in cams if v.root not in self._seen_roots]
-        first, self._first_volumes = self._first_volumes, False
-        self._seen_roots = roots
-        if self.card_root and not os.path.isdir(self.card_root) and not self.busy:
-            self.clear_card("removed")
-        if new and not self.busy and (first or not self.card_root or self.card_root not in roots):
-            self.scan_card(new[0].root)
+        cams = {v.root: v for v in vols if v.camera}
+        for r in list(self.cards):
+            e = self.cards[r]
+            if r in cams:
+                e.vol = cams[r]
+            elif not e.extra.get("folder"):  # a pulled card / unplugged device
+                del self.cards[r]
+            elif not os.path.isdir(r):
+                del self.cards[r]
+        new = [v for v in cams.values() if v.root not in self.cards]
+        for v in new:
+            self.cards[v.root] = CardEntry(v.root, v)
+        if self.card_root and self.card_root not in self.cards:
+            if self.cards:
+                self.select_card(self._best_card())
+            elif not self.busy:
+                self.clear_card("removed")
+        elif not self.card_root and self.cards:
+            self.select_card(new[0].root if new else next(iter(self.cards)))
+        self._kick_scans()
+        self.cards_changed.emit()
         self.easy.on_volumes(vols)
         self.update_drives()
 
-    def scan_card(self, root: str) -> None:
-        if self._scan_worker and self._scan_worker.isRunning():
-            self._pending_scan = root
+    def _best_card(self) -> str:
+        """A card with something new, else the first one."""
+        for e in self.cards.values():
+            if e.new_files or e.state in ("waiting", "scanning"):
+                return e.root
+        return next(iter(self.cards))
+
+    def _kick_scans(self) -> None:
+        """Read the next card that hasn't been read yet (the selected one first). One at a time."""
+        if self._scan_worker is not None and self._scan_worker.isRunning():
             return
-        self.scanning = True
-        self.card_root = root
-        self.card_note = ""
-        self.card_scanning.emit(root)
-        w = Worker(lambda emit: scan_card(root), self)
-        w.bridge.finished.connect(lambda scan: self._card_scanned(root, scan))
-        w.bridge.failed.connect(lambda _tb: self._card_scanned(root, None))
+        order = sorted(self.cards.values(), key=lambda e: e.root != self.card_root)
+        e = next((x for x in order if x.state == "waiting"), None)
+        if e is None:
+            return
+        e.state = "scanning"
+        root, gen = e.root, e.extra.get("gen", 0)
+        if root == self.card_root:
+            self.card_scanning.emit(root)
+        days = self.settings.phone_recent_days
+        w = Worker(lambda emit: scan_card(root, phone_days=days), self)
+        w.bridge.finished.connect(lambda scan, r=root, g=gen: self._entry_scanned(r, g, scan))
+        w.bridge.failed.connect(lambda _tb, r=root, g=gen: self._entry_scanned(r, g, None))
         self._scan_worker = w
         w.start()
+        self.cards_changed.emit()
+
+    def _entry_scanned(self, root: str, gen: int, scan) -> None:
+        self._scan_worker = None
+        e = self.cards.get(root)
+        if e is not None:
+            if e.extra.get("gen", 0) != gen:
+                e.state = "waiting"  # asked to read it again while this read ran
+            else:
+                if scan is None:
+                    e.scan, e.state = None, "unreadable"
+                elif not scan.files:
+                    e.scan, e.state = None, "empty"
+                else:
+                    e.scan, e.state = scan, "ready"
+                summarize(e, self.settings)
+                if not self.busy:
+                    e.job_total = e.job_done = e.job_failed = 0
+                if root == self.card_root:
+                    self._publish_selected()
+        self.cards_changed.emit()
+        QTimer.singleShot(0, self._kick_scans)
+
+    def _publish_selected(self) -> None:
+        e = self.cards.get(self.card_root)
+        if e is None:
+            return
+        self.sidebar.set_active_card(e.root)
+        if e.state in ("waiting", "scanning"):
+            self.card_scan = None
+            self.card_scanning.emit(e.root)
+            return
+        self.card_scan = e.scan
+        self.card_note = {"empty": "empty", "unreadable": "unreadable"}.get(e.state, "")
+        self.card_changed.emit(self.card_scan)
+
+    def select_card(self, root: str) -> None:
+        """Show this card/device (instant if it has been read already)."""
+        if root not in self.cards:
+            vol = next((v for v in self.volumes if v.root == root), None)
+            self.cards[root] = CardEntry(root, vol)
+            if vol is None:
+                self.cards[root].extra["folder"] = True  # "Copy from a folder"
+        self.card_root = root
+        self.card_note = ""
+        self._publish_selected()
+        self._kick_scans()
+        self.cards_changed.emit()
+
+    def scan_card(self, root: str) -> None:
+        """Select a card/device and read it (again)."""
+        e = self.cards.get(root)
+        if e is not None:
+            e.extra["gen"] = e.extra.get("gen", 0) + 1
+            e.state = "waiting"
+        self.select_card(root)
+
+    def rescan_roots(self, roots) -> None:
+        for r in roots:
+            e = self.cards.get(r)
+            if e is not None and self._present(r):
+                e.extra["gen"] = e.extra.get("gen", 0) + 1
+                e.state = "waiting"
+        if self.card_root in roots:
+            self._publish_selected()
+        self._kick_scans()
+        self.cards_changed.emit()
+
+    def resummarize(self) -> None:
+        """The destination changed: recount what's new on every card."""
+        for e in self.cards.values():
+            summarize(e, self.settings)
+        self.cards_changed.emit()
+
+    @staticmethod
+    def _present(root: str) -> bool:
+        if sources.is_portable(root):
+            return sources.src_exists(root)
+        return os.path.isdir(root)
+
+    def _card_present(self) -> bool:
+        return self._present(self.card_root)
 
     def rescan_card(self) -> None:
-        if self.card_root and os.path.isdir(self.card_root):
+        if self.card_root and self._card_present():
             self.scan_card(self.card_root)
         elif self.card_root:
             self.clear_card("removed")
-
-    def _card_scanned(self, root: str, scan) -> None:
-        self.scanning = False
-        if scan is None:
-            self.card_scan, self.card_note = None, "unreadable"
-        elif not scan.files:
-            self.card_scan, self.card_note = None, "empty"
-        else:
-            self.card_scan, self.card_note = scan, ""
-        self.sidebar.set_active_card(root if self.card_scan else "")
-        self.card_changed.emit(self.card_scan)
-        if self._pending_scan:
-            nxt, self._pending_scan = self._pending_scan, None
-            self.scan_card(nxt)
 
     def clear_card(self, note: str = "") -> None:
         self.card_scan = None
@@ -193,6 +294,43 @@ class MainWindow(QMainWindow):
         self.sidebar.set_active_card("")
         self.card_changed.emit(None)
 
+    def ready_cards(self) -> list:
+        """Cards/devices that have been read and have files."""
+        return [e for e in self.cards.values() if e.state == "ready" and e.scan is not None]
+
+    def source_limits(self, roots, dest_root: str) -> dict:
+        out = {}
+        for r in roots:
+            e = self.cards.get(r)
+            out[r] = source_limit(e if e is not None else r, dest_root, self.settings)[0]
+        return out
+
+    # ---- per-device progress while a job runs
+    def _job_started_cards(self, job: Job) -> None:
+        self._job_roots = {}
+        for e in self.cards.values():
+            e.job_total = e.job_done = e.job_failed = 0
+        if job.kind != "offload":
+            return
+        for g in job.groups:
+            for t in g.tasks:
+                root = t.src_root or g.source_root
+                self._job_roots[t.src] = root
+                e = self.cards.get(root)
+                if e is not None:
+                    e.job_total += 1
+        self.cards_changed.emit()
+
+    def _track_job_event(self, kind: str, p: dict) -> None:
+        if kind != "file" or not self._job_roots:
+            return
+        e = self.cards.get(self._job_roots.get(p.get("src", ""), ""))
+        if e is not None:
+            e.job_done += 1
+            if p.get("status") == "failed":
+                e.job_failed += 1
+            self.cards_changed.emit()
+
     # ---------------------------------------------------------------- navigation
     def show_page(self, idx: int) -> None:
         self.stack.setCurrentIndex(idx)
@@ -200,8 +338,7 @@ class MainWindow(QMainWindow):
 
     def _card_clicked(self, root: str) -> None:
         self.show_page(0)
-        if not self.busy:
-            self.scan_card(root)
+        self.select_card(root)
 
     def update_drives(self) -> None:
         s = self.settings
@@ -225,6 +362,11 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- jobs
     def resolve_workers(self, job: Job, src_root: str, dest_root: str) -> None:
+        vol = next((v for v in self.volumes if v.root == src_root), None)
+        if sources.is_portable(src_root) or (vol is not None and vol.portable):
+            job.options.workers = 1
+            job.options.workers_reason = "USB device (phone or camera): one file at a time"
+            return
         if self.settings.workers > 0:
             n, why = self.settings.workers, "set in Settings"
         else:
@@ -276,6 +418,7 @@ class MainWindow(QMainWindow):
         if self.busy:
             return
         self.current_job = job
+        self._job_started_cards(job)
         self.job_started.emit(job)
         self.run_runner(job.title, lambda emit, logs: TransferRunner(job, emit=emit, log_dir=logs),
                         after=after, on_event=on_event, show_summary=show_summary)
@@ -341,8 +484,10 @@ class MainWindow(QMainWindow):
             SummaryDialog(res, self).exec()
         if after:
             after(res)
-        if res.kind == "offload":
-            self.rescan_card()  # refreshes "already saved" marks everywhere
+        if res.kind == "offload":  # re-read every card the job touched: refreshes "already saved" everywhere
+            roots = {r for r in self._job_roots.values() if r} or ({self.card_root} if self.card_root else set())
+            self._job_roots = {}
+            self.rescan_roots(roots)
 
     def _crashed(self, tb: str) -> None:
         self._set_busy(False)

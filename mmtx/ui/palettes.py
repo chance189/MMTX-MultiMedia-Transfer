@@ -225,6 +225,14 @@ QFrame#PickDelete {{ background: rgba({i},0.04); border: 1px solid rgba({i},0.12
 QFrame#PickDelete[on="true"] {{ background: rgba(239,68,68,0.10); border: 2px solid {P.todo}; }}
 QLabel#PickDeleteHead {{ color: {P.text}; font-size: 14pt; font-weight: 800; }}
 QLabel#PickDeleteText {{ color: {P.sub}; font-size: 12pt; }}
+QFrame#NameBox {{ background: rgba({i},0.05); border: 2px solid rgba({i},0.22); border-radius: 18px; }}
+QLabel#NameHead {{ color: {P.eyebrow}; font-size: 11pt; font-weight: 800; letter-spacing: 1px; }}
+QLineEdit#NameEdit, QLineEdit#PickTitle {{ background: rgba({i},0.07); color: {P.text}; border: 1px solid rgba({i},0.28);
+                        border-radius: 12px; padding: 8px 14px; font-size: 18pt; font-weight: 800;
+                        selection-background-color: rgba({i},0.30); selection-color: {P.text}; }}
+QLineEdit#PickTitle {{ font-size: 13pt; padding: 6px 12px; }}
+QLineEdit#NameEdit:focus, QLineEdit#PickTitle:focus {{ border: 2px solid {P.text}; }}
+QLabel#NamePreview {{ color: {P.sub}; font-size: 12.5pt; }}
 QDialog#EasyDialog {{ background: {P.dialog_bg}; }}
 QDialog#EasyDialog QLabel {{ background: transparent; }}
 QLabel#EasyDialogTitle {{ color: {P.text}; font-size: 22pt; font-weight: 900; }}

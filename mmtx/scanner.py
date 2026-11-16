@@ -7,10 +7,10 @@ import re
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 
-from . import cameras
+from . import cameras, sources
 from .manifest import find_manifest, is_manifest
 from .media import media_kind, poster_candidates, thumb_candidates
 from .transfer import is_junk, list_folder_files
@@ -80,12 +80,14 @@ def scan_card(
     root: str,
     cancel: Optional[threading.Event] = None,
     on_progress: Optional[Callable[[int], None]] = None,
+    phone_days: int = 0,
 ) -> CardScan:
+    """phone_days > 0: from phones keep only files from that many recent days (a phone holds years)."""
     raw: list[tuple[str, str, os.stat_result]] = []
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in sources.walk(root):
         if cancel is not None and cancel.is_set():
             break
-        rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        rel_dir = sources.relpath(dirpath, root).replace(os.sep, "/")
         rel_dir = "" if rel_dir == "." else rel_dir
         up = [p.upper() for p in rel_dir.split("/")] if rel_dir else []
         keep = []
@@ -105,9 +107,9 @@ def scan_card(
             ext = os.path.splitext(fn)[1].lower()
             if not (in_dcim_sub or in_m4) and ext not in cameras.MEDIA_EXTS:
                 continue
-            p = os.path.join(dirpath, fn)
+            p = sources.join(dirpath, fn)
             try:
-                st = os.stat(p)
+                st = sources.src_stat(p)
             except OSError:
                 continue
             raw.append((p, f"{rel_dir}/{fn}" if rel_dir else fn, st))
@@ -130,6 +132,11 @@ def scan_card(
                 capture=cameras.capture_time(prof, p, rel, st.st_mtime),
             )
         )
+
+    if phone_days > 0:
+        cutoff = datetime.now() - timedelta(days=phone_days)
+        old_keys = {(f.profile, f.key) for f in files if f.profile == "phone" and f.capture < cutoff}
+        files = [f for f in files if (f.profile, f.key) not in old_keys]
 
     # every file of a shot (clip, proxy, thumb, sidecar) lands on the main clip's day
     by_key: dict[tuple[str, str], list[MediaFile]] = defaultdict(list)
@@ -168,13 +175,17 @@ def detect_devices(root: str, files: list[MediaFile]) -> dict[str, str]:
         elif prof == "sony":
             xml = next((f.path for f in files if f.profile == prof and f.name.upper().endswith("M01.XML")), None)
             label = cameras.sony_model(xml) if xml else None
-        elif prof == "generic":
-            label = volume_label(root)
+        elif prof in ("generic", "phone"):
+            dev = sources.device_of(root)
+            label = dev.name if dev else volume_label(root)
         out[prof] = label or cameras.PROFILE_NAMES[prof]
     return out
 
 
 def volume_label(root: str) -> Optional[str]:
+    if sources.is_portable(root):
+        dev = sources.device_of(root)
+        return dev.name if dev else None
     name = os.path.basename(os.path.normpath(root))
     if not name or name.upper() in ("NO NAME", "UNTITLED", "") or re.match(r"^[A-Z]:?$", name, re.I):
         return None

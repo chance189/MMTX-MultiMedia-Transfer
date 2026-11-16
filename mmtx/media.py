@@ -211,6 +211,8 @@ def embedded_jpeg(path: str, limit: int = 24 * 1024 * 1024) -> Optional[bytes]:
 
 def thumb_candidates(main: str, siblings: list[str]) -> list[tuple[str, str]]:
     """Ordered (path, method) to try for one clip/photo. method: image | video | raw."""
+    if main.startswith("portable://"):
+        return []  # over USB a thumbnail means reading the whole clip; the tile shows its icon instead
     kind = media_kind(main)
     jpgs = [p for p in siblings if os.path.splitext(p)[1].lower() in (".thm", ".jpg", ".jpeg")]
     proxies = [p for p in siblings if os.path.splitext(p)[1].lower() in (".lrv", ".lrf")

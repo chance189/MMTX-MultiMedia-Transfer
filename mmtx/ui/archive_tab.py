@@ -7,8 +7,8 @@ import time
 from datetime import date
 from typing import Optional
 
-from PySide6.QtCore import QDate, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QDate, QPointF, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -27,23 +27,84 @@ from PySide6.QtWidgets import (
 
 from PySide6.QtCore import QRectF
 from PySide6.QtGui import QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QStyledItemDelegate
+from PySide6.QtWidgets import QStyle, QStyledItemDelegate
 
 from ..planner import ARCHIVE_LAYOUTS, archive_dest, is_inside, plan_archive
 from ..scanner import WorkFolder, scan_working
 from ..transfer import human_bytes
 from . import theme
-from .icons import draw_glyph
+from .icons import draw_check, draw_cross, draw_glyph
 from .widgets import Card, NumItem, PathPicker, PillDelegate, Worker, button, label, page_header, ro_item
 
 C_CHECK, C_THUMB, C_NAME, C_DATE, C_FILES, C_SIZE, C_SUMS, C_DEST, C_STATUS = range(9)
 KEY_ROLE = Qt.UserRole + 7
+LIVE_ROLE = Qt.UserRole + 8  # (visual state, text, fraction, done_at) while an archive job runs
+
+
+def _visual(d: dict) -> str:
+    """Live folder state -> wait | busy | almost | done | bad | kept | stopped (same looks as Easy mode)."""
+    from .easy_clips import ALMOST
+
+    st = d["state"]
+    if st == "copying":
+        return "almost" if d["total"] and d["done"] / d["total"] >= ALMOST else "busy"
+    return {"waiting": "wait", "verified": "done", "moved": "done", "errors": "bad", "warnings": "kept",
+            "cancelled": "stopped"}.get(st, "wait")
+
+
+class LiveStatusDelegate(PillDelegate):
+    """Status column while a job runs: colored pill with a rotating hourglass (copying), a check (done),
+    a cross (problem). Falls back to the plain pill otherwise."""
+
+    def paint(self, p, opt, index):  # noqa: D401
+        live = index.data(LIVE_ROLE)
+        if not live:
+            return super().paint(p, opt, index)
+        from . import easy_clips as ec
+
+        vis, text, _frac, done_at = live
+        col = {"busy": ec.P.busy, "almost": ec.P.almost, "done": ec.P.done_hi, "bad": ec.P.bad,
+               "kept": ec.P.warn}.get(vis, ec.P.wait)
+        level = {"busy": ec.pulse(), "almost": ec.flash()}.get(vis, 1.0)
+        if vis == "done" and done_at and ec.done_flashing({"done_at": done_at}):
+            level = ec.flash(0.6)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing)
+        if opt.state & QStyle.State_Selected:
+            p.fillRect(opt.rect, opt.palette.highlight())
+        f = QFont(opt.font)
+        f.setPointSizeF(8.8)
+        f.setBold(True)
+        fm = QFontMetrics(f)
+        h = fm.height() + 10
+        icon = 18 if vis in ("busy", "almost", "done", "bad") else 0
+        gap = 8 if icon else 0
+        w = min(opt.rect.width() - 8, fm.horizontalAdvance(text) + 22 + icon + gap)
+        rect = QRectF(opt.rect.x() + 4, opt.rect.center().y() - h / 2 + 1, w, h)
+        bg = QColor(col)
+        bg.setAlpha(int(60 + 150 * level) if vis in ("busy", "almost", "done") else 60)
+        p.setPen(Qt.NoPen)
+        p.setBrush(bg)
+        p.drawRoundedRect(rect, h / 2, h / 2)
+        ic = QPointF(rect.x() + 8 + icon / 2, rect.center().y())
+        if vis in ("busy", "almost"):
+            ec.draw_hourglass(p, ic, icon, "#ffffff", ec.hourglass_angle(), ec.sand_level())
+        elif vis == "done":
+            draw_check(p, ic, icon / 2, "#ffffff", col)
+        elif vis == "bad":
+            draw_cross(p, ic, icon / 2, "#ffffff")
+        p.setPen(QColor("#ffffff") if vis in ("busy", "almost", "done", "bad") else QColor(col))
+        p.setFont(f)
+        p.drawText(rect.adjusted(10 + icon + gap, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft,
+                   fm.elidedText(text, Qt.ElideRight, int(w) - 18 - icon - gap))
+        p.restore()
 
 
 class PosterDelegate(QStyledItemDelegate):
     def __init__(self, loader, parent=None):
         super().__init__(parent)
         self.loader = loader
+        self._grey: dict = {}
 
     def paint(self, p, opt, index):  # noqa: D401
         p.save()
@@ -57,8 +118,14 @@ class PosterDelegate(QStyledItemDelegate):
         path.addRoundedRect(r, 6, 6)
         p.setClipPath(path)
         key = index.data(KEY_ROLE)
+        live = index.data(LIVE_ROLE)
+        vis = live[0] if live else ""
+        from . import easy_clips as ec
+
         pm = self.loader.pixmap(key) if key else None
         if pm is not None and not pm.isNull():
+            if vis in ("wait", "stopped"):
+                pm = ec.grey_pixmap(pm, self._grey, key)
             pw, ph = pm.width() / pm.devicePixelRatio(), pm.height() / pm.devicePixelRatio()
             sc = max(r.width() / pw, r.height() / ph)
             sw, sh = r.width() / sc, r.height() / sc
@@ -67,9 +134,28 @@ class PosterDelegate(QStyledItemDelegate):
             p.fillRect(r, QColor("#1a2030"))
             g = h * 0.5
             draw_glyph(p, "folder", QRectF(r.center().x() - g / 2, r.center().y() - g / 2, g, g), "#3d4659", 1.4)
+        if vis in ("wait", "stopped", "busy", "almost", "bad"):
+            p.fillRect(r, QColor(8, 10, 14, 120))
+        elif vis == "done":
+            t = QColor(ec.P.done_hi)
+            t.setAlpha(70)
+            p.fillRect(r, t)
         p.setClipping(False)
-        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
-        p.drawRoundedRect(r, 6, 6)
+        c = r.center()
+        if vis in ("busy", "almost"):
+            col = ec.P.busy if vis == "busy" else ec.P.almost
+            ec.glow_border(p, r, 6, col, ec.pulse() if vis == "busy" else ec.flash(), width=2.2)
+            ec.draw_hourglass(p, c, h * 0.62, col, ec.hourglass_angle(), ec.sand_level())
+        elif vis == "done":
+            flashing = ec.done_flashing({"done_at": live[3]})
+            ec.glow_border(p, r, 6, ec.P.done_hi, ec.flash(0.6) if flashing else 0.3, width=2.2)
+            draw_check(p, c, h * 0.3, ec.P.done_hi, ec.P.on_done)
+        elif vis == "bad":
+            draw_cross(p, c, h * 0.28, ec.P.bad)
+        else:
+            p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r, 6, 6)
         p.restore()
 
 
@@ -175,7 +261,10 @@ class ArchiveTab(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(60)
         self.table.setItemDelegateForColumn(C_THUMB, PosterDelegate(self.loader, self.table))
         self.table.setItemDelegateForColumn(C_SUMS, PillDelegate(self.table))
-        self.table.setItemDelegateForColumn(C_STATUS, PillDelegate(self.table))
+        self.table.setItemDelegateForColumn(C_STATUS, LiveStatusDelegate(self.table))
+        self._anim = QTimer(self)  # repaints the hourglasses / flashes only while a job is moving
+        self._anim.setInterval(40)
+        self._anim.timeout.connect(self._animate)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Interactive)
         hh.setSectionResizeMode(C_CHECK, QHeaderView.Fixed)
@@ -493,6 +582,8 @@ class ArchiveTab(QWidget):
             if key:
                 state = p.get("state", "")
                 self._live[key]["state"] = "copying" if state == "start" else state
+                if state in ("verified", "moved"):
+                    self._live[key]["done_at"] = time.monotonic()
         else:
             return
         self._apply_live()
@@ -526,11 +617,32 @@ class ArchiveTab(QWidget):
             text, color = self._live_text(d)
             st.setText(text)
             st.setForeground(QColor(color))
+            vis = _visual(d)
+            clean = text.lstrip("✓!✕ ").strip()
+            if vis == "almost":
+                clean = f"Almost done  {d['done']}/{d['total']}"
+            live = (vis, clean, d["done"] / d["total"] if d["total"] else 0.0, d.get("done_at"))
+            st.setData(LIVE_ROLE, live)
+            th = self.table.item(r, C_THUMB)
+            if th is not None:
+                th.setData(LIVE_ROLE, live)
             f = name.font()
             f.setBold(d["state"] == "copying")
             name.setFont(f)
             name.setForeground(QColor(theme.ACCENT if d["state"] == "copying" else theme.TEXT))
         self._updating = False
+        if not self._anim.isActive():
+            self._anim.start()
+
+    def _animate(self) -> None:
+        from .easy_clips import done_flashing
+
+        moving = any(_visual(d) in ("busy", "almost") or (_visual(d) == "done" and done_flashing(d))
+                     for d in self._live.values())
+        if moving:
+            self.table.viewport().update()
+        else:
+            self._anim.stop()
 
     def _job_finished(self, res) -> None:
         if res.kind != "archive":

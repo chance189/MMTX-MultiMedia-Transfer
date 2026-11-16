@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QProgressBar, Q
 
 from ..drives import drive_info
 from ..transfer import human_bytes
+from . import theme
 from .icons import icon
 from .volumes import Volume, list_volumes
 from .widgets import CamBadge, Worker, label, open_path
@@ -67,11 +68,22 @@ class CardTile(QFrame):
         col = QVBoxLayout()
         col.setSpacing(1)
         name = label(vol.camera or "Camera", "TileTitle")
-        sub = f"{vol.root}  ·  {human_bytes(vol.total)}" + ("  ·  locked" if vol.read_only else "")
+        where = vol.name if getattr(vol, "portable", False) else vol.root
+        size = f"  ·  {human_bytes(vol.total)}" if vol.total else "  ·  over USB"
+        sub = f"{where}{size}" + ("  ·  locked" if vol.read_only else "")
         col.addWidget(name)
         col.addWidget(label(sub, "TileSub"))
+        self.status = label("", "TileStatus")
+        self.status.setVisible(False)
+        col.addWidget(self.status)
         lay.addLayout(col, 1)
-        self.setToolTip(f"{vol.camera} on {vol.root}\nClick to open in Offload")
+        self.setToolTip(f"{vol.camera} on {vol.root}\nClick to show it in Offload")
+
+    def set_status(self, text: str, tone: str) -> None:
+        colors = {"busy": theme.ACCENT, "done": theme.SUCCESS, "new": "#fbbf24", "warn": theme.DANGER}
+        self.status.setText(text)
+        self.status.setStyleSheet(f"color: {colors.get(tone, theme.MUTED)}; font-weight: 700;")
+        self.status.setVisible(bool(text))
 
     def set_active(self, on: bool) -> None:
         self.setProperty("active", on)
@@ -240,6 +252,14 @@ class Sidebar(QFrame):
             t.set_active(v.root == self._active_root)
             self.cards_box.addWidget(t)
             self.card_tiles.append(t)
+
+    def set_card_statuses(self, cards: dict) -> None:
+        for t in self.card_tiles:
+            e = cards.get(t.root)
+            if e is None:
+                t.set_status("", "idle")
+            else:
+                t.set_status(*e.status())
 
     def set_active_card(self, root: str) -> None:
         self._active_root = root

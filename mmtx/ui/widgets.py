@@ -216,7 +216,7 @@ def page_header(title: str, subtitle: str = "") -> tuple[QHBoxLayout, QLabel, QL
 
 
 class CamBadge(QWidget):
-    """Rounded colored square with a short camera tag (GP / DJI / 360 / SNY)."""
+    """Rounded colored square with the camera's device icon (drone, action cam, 360, cinema, phone, card)."""
 
     def __init__(self, label_or_profile: str = "", size: int = 34, parent=None):
         super().__init__(parent)
@@ -224,6 +224,8 @@ class CamBadge(QWidget):
         self.set_camera(label_or_profile)
 
     def set_camera(self, label_or_profile: str) -> None:
+        self.label = {"gopro": "GoPro", "dji": "DJI", "insta360": "Insta360", "sony": "Sony",
+                      "phone": "Phone"}.get(label_or_profile, label_or_profile)
         self.text, self.color = camera_style(label_or_profile)
         self.update()
 
@@ -237,12 +239,12 @@ class CamBadge(QWidget):
         p.setPen(QPen(QColor(c.red(), c.green(), c.blue(), 120), 1))
         p.setBrush(bg)
         p.drawRoundedRect(r, r.width() * 0.28, r.width() * 0.28)
-        f = QFont(self.font())
-        f.setBold(True)
-        f.setPointSizeF(max(6.5, self.width() * (0.26 if len(self.text) <= 2 else 0.21)))
-        p.setFont(f)
-        p.setPen(c)
-        p.drawText(r, Qt.AlignCenter, self.text)
+        from ..sources import device_kind_for
+        from .icons import draw_device
+
+        pad = r.width() * 0.14
+        draw_device(p, device_kind_for(self.label) if self.label else "card", r.adjusted(pad, pad, -pad, -pad),
+                    self.color, width=1.5, fill_alpha=50)
 
 
 class DateTile(QWidget):

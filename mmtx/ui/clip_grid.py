@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QListWidget, QListWidgetItem, QStyle, QStyledItemDelegate
 
@@ -52,8 +52,12 @@ class ClipDelegate(QStyledItemDelegate):
         self.f_meta = QFont()
         self.f_meta.setPointSizeF(8.0)
         self.f_badge = QFont()
-        self.f_badge.setPointSizeF(7.4)
+        self.f_badge.setPointSizeF(7.6)
         self.f_badge.setBold(True)
+        self._grey: dict = {}
+        from . import easy_clips  # shared state drawing (imported here: easy_clips imports this module)
+
+        self.ec = easy_clips
 
     def sizeHint(self, option, index):  # noqa: N802
         return CELL
@@ -70,6 +74,13 @@ class ClipDelegate(QStyledItemDelegate):
         p.setPen(QColor(fg))
         p.setFont(self.f_badge)
         p.drawText(rect, Qt.AlignCenter, text)
+
+    def _center_pill(self, p: QPainter, thumb: QRectF, text: str, bg: QColor, fg: str = "") -> None:
+        fm = QFontMetrics(self.f_badge)
+        w = fm.horizontalAdvance(text) + 14
+        lum = bg.red() * 0.299 + bg.green() * 0.587 + bg.blue() * 0.114
+        self._pill(p, text, QPointF(thumb.center().x() - w / 2 + 2, thumb.bottom() - 5), False, bg,
+                   fg or ("#0b0b0c" if lum > 150 else "#ffffff"))
 
     def paint(self, p: QPainter, opt, index) -> None:  # noqa: C901
         info = index.data(ROLE) or ClipInfo()
@@ -102,51 +113,66 @@ class ClipDelegate(QStyledItemDelegate):
             draw_glyph(p, KIND_GLYPH.get(info.get("kind", ""), "film"),
                        QRectF(thumb.center().x() - gl / 2, thumb.center().y() - gl / 2, gl, gl), "#3d4659", 1.5)
 
-        if status in ACTIVE:
-            label, color = ACTIVE[status]
-            p.fillRect(thumb, QColor(8, 10, 14, 165))
-            c = thumb.center() - QPointF(0, 6)
-            rad = 17.0
-            p.setPen(QPen(QColor(255, 255, 255, 45), 3.2))
-            p.setBrush(Qt.NoBrush)
-            p.drawEllipse(c, rad, rad)
-            pen = QPen(QColor(color), 3.2)
-            pen.setCapStyle(Qt.RoundCap)
-            p.setPen(pen)
-            frac = max(0.0, min(1.0, info.get("progress", 0.0)))
-            p.drawArc(QRectF(c.x() - rad, c.y() - rad, 2 * rad, 2 * rad), 90 * 16, int(-frac * 360 * 16))
-            p.setPen(QColor("#ffffff"))
-            p.setFont(self.f_badge)
-            p.drawText(QRectF(c.x() - rad, c.y() - rad, 2 * rad, 2 * rad), Qt.AlignCenter, f"{int(frac * 100)}%")
-            p.setPen(QColor("#d6dbe6"))
-            p.drawText(QRectF(thumb.x(), c.y() + rad + 2, THUMB_W, 14), Qt.AlignHCenter, label)
-        elif status == "queued":
+        # live transfer states, same look as Easy mode: grey waiting, blue hourglass copying,
+        # orange almost done, big green check done, red cross problem
+        ec = self.ec
+        state = ec.tile_state(info) if status else ""
+        if state in ("wait", "stopped"):
+            if pm is not None and not pm.isNull():
+                ec.draw_cover(p, thumb, ec.grey_pixmap(pm, self._grey, info.get("key", "")))
             p.fillRect(thumb, QColor(8, 10, 14, 110))
-        elif status in ("failed", "cancelled"):
-            p.fillRect(thumb, QColor(240, 82, 90, 60) if status == "failed" else QColor(8, 10, 14, 120))
+        elif state in ("busy", "almost"):
+            p.fillRect(thumb, QColor(8, 10, 14, 120))
+        elif state == "done":
+            t = QColor(ec.P.done_hi)
+            t.setAlpha(70)
+            p.fillRect(thumb, t)
+        elif state == "bad":
+            p.fillRect(thumb, QColor(240, 82, 90, 70))
         p.setClipping(False)
 
+        frac = max(0.0, min(1.0, info.get("frac", info.get("progress", 0.0))))
+        mid = thumb.center() - QPointF(0, 7)
+        if state in ("busy", "almost"):
+            col = ec.P.busy if state == "busy" else ec.P.almost
+            ec.glow_border(p, thumb, 9, col, ec.pulse() if state == "busy" else ec.flash(),
+                           width=2.5 if state == "busy" else 3.2)
+            ec.draw_ring(p, mid, 24, frac, col, width=4)
+            ec.draw_hourglass(p, mid, 28, col, ec.hourglass_angle(), ec.sand_level())
+            word = "Almost done" if state == "almost" else ("Checking" if status in ("verifying", "checking")
+                                                             else "Copying")
+            self._center_pill(p, thumb, f"{word} {int(frac * 100)}%", QColor(col))
+        elif state == "done":
+            flashing = ec.done_flashing(info)
+            ec.glow_border(p, thumb, 9, ec.P.done_hi, ec.flash(0.6) if flashing else 0.35, width=3 if flashing else 2.2)
+            draw_check(p, mid, 24, ec.P.done_hi, ec.P.on_done)
+            self._center_pill(p, thumb, "Saved", QColor(ec.P.done_hi), fg="#06210f")
+        elif state == "bad":
+            ec.glow_border(p, thumb, 9, ec.P.bad, 0.3, width=2.2)
+            draw_cross(p, mid, 22, ec.P.bad)
+            self._center_pill(p, thumb, "Problem", QColor(ec.P.bad))
+        elif state in ("wait", "stopped"):
+            self._center_pill(p, thumb, "Stopped" if state == "stopped" else "Waiting", QColor(ec.P.wait))
         p.setBrush(Qt.NoBrush)
-        if hover:
+        if state:
+            pass
+        elif hover:
             p.setPen(QPen(QColor(theme.ACCENT), 1.6))
+            p.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
         else:
             p.setPen(QPen(QColor(255, 255, 255, 22), 1.0))
-        p.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
+            p.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
 
         kind = info.get("kind", "")
         if kind in ("360", "360photo"):
             self._pill(p, "360°", QPointF(thumb.left() + 6, thumb.top() + 20), False, QColor(242, 194, 48, 230), "#1a1400")
         dur = self.loader.duration(info.get("key", "")) if kind in ("video", "360") else None
         badge = format_duration(dur) if dur is not None else KIND_BADGE.get(kind, "")
-        if badge and status not in ACTIVE:
+        if badge and not state:
             self._pill(p, badge, QPointF(thumb.right() - 6, thumb.bottom() - 6), True, QColor(6, 8, 12, 190))
 
         mark = QPointF(thumb.right() - 13, thumb.top() + 13)
-        if status in ("copied", "skipped"):
-            draw_check(p, mark, 9.5, theme.SUCCESS)
-        elif status == "failed":
-            draw_cross(p, mark, 9.5, theme.DANGER)
-        elif info.get("present") and status not in ACTIVE and status != "queued":
+        if info.get("present") and not state:
             draw_check(p, mark, 9, theme.SUCCESS, outline_only=True)
 
         ty = thumb.bottom() + 7
@@ -187,6 +213,9 @@ class ClipGrid(QListWidget):
         self.setFrameShape(QListWidget.NoFrame)
         self.setObjectName("ClipGrid")
         self.setItemDelegate(ClipDelegate(loader, self))
+        self._anim = QTimer(self)  # runs only while a tile is copying, almost done, or just finished
+        self._anim.setInterval(40)
+        self._anim.timeout.connect(self._animate)
         self.collapsed_rows = 2
         self.expanded = False
         self.itemDoubleClicked.connect(lambda it: open_path((it.data(ROLE) or ClipInfo()).get("src", "")))
@@ -204,6 +233,22 @@ class ClipGrid(QListWidget):
 
     def refresh(self, it: QListWidgetItem) -> None:
         self.viewport().update(self.visualItemRect(it))
+        if not self._anim.isActive():
+            self._anim.start()
+
+    def _animate(self) -> None:
+        from .easy_clips import done_flashing, tile_state
+
+        moving = False
+        for i in range(self.count()):
+            it = self.item(i)
+            info = it.data(ROLE)
+            st = tile_state(info) if info is not None and info.get("status") else ""
+            if st in ("busy", "almost") or (st == "done" and done_flashing(info)):
+                moving = True
+                self.viewport().update(self.visualItemRect(it))
+        if not moving:
+            self._anim.stop()
 
     def wheelEvent(self, e):  # noqa: N802 - let the page scroll
         e.ignore()
