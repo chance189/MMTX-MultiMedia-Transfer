@@ -186,7 +186,8 @@ class Sidebar(QFrame):
 
         self.nav = QButtonGroup(self)
         self.nav.setExclusive(True)
-        for i, (text, ic) in enumerate((("Offload", "offload"), ("Archive", "archive"), ("Verify", "verify"))):
+        for i, (text, ic) in enumerate((("Offload", "offload"), ("Archive", "archive"), ("Verify", "verify"),
+                                              ("Google Photos", "photos"))):
             b = QPushButton(f"  {text}")
             b.setObjectName("Nav")
             b.setCheckable(True)

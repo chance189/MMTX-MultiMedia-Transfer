@@ -68,6 +68,11 @@ class Settings:
     easy_palette: str = "graphite"  # graphite | midnight | daylight | contrast
     easy_device: str = ""  # last device picked in Easy mode (drone | action | 360 | cinema | phone | card)
     phone_recent_days: int = 30  # phones hold years of photos: show only this many recent days (0 = all)
+    # Google Photos takeouts
+    takeout_library: str = ""  # the photo library: YYYY/YYYY_MM/YYYY_MM_DD inside
+    takeout_scratch: bool = True  # unpack through a scratch folder next to each zip
+    takeout_trash: bool = False  # bring in the Trash folder too
+    takeout_last_dir: str = ""  # where the zip picker opens
 
     @classmethod
     def load(cls) -> "Settings":

@@ -151,6 +151,10 @@ class SummaryDialog(QDialog):
             return f"All {res.verified_ok} files are bit-perfect"
         if res.kind == "checksum":
             return f"Recorded checksums for {res.files_ok} files"
+        if res.kind == "takeout":
+            if not res.new:
+                return "Everything was already in the library"
+            return f"{res.new:,} new file{'s' if res.new != 1 else ''} in your photo library"
         return f"All {res.files_ok} files verified"
 
     @staticmethod
@@ -159,6 +163,25 @@ class SummaryDialog(QDialog):
             return f"{res.manifests} folder(s) re-read from disk and compared to their recorded checksums."
         if res.kind == "checksum":
             return f"{res.manifests} manifest(s) written. Use Verify any time to re-check."
+        if res.kind == "takeout":
+            bits = []
+            if res.duplicates:
+                one = res.duplicates == 1
+                bits.append(f"{res.duplicates:,} {'was' if one else 'were'} already there (album copies, earlier "
+                            f"takeouts, same file in the folder) and {'wasn' if one else 'weren'}'t written again")
+            fd = res.date_sources.get("filedate", 0)
+            if fd:
+                bits.append(f"{fd:,} had no date inside, so the file's created date was used")
+            if res.no_date:
+                bits.append(f"{res.no_date:,} had no date anywhere and {'is' if res.no_date == 1 else 'are'} in "
+                            "'Unknown date'")
+            if res.refiled:
+                bits.append(f"{res.refiled:,} moved to their proper day once their details turned up")
+            if res.restored:
+                bits.append(f"{res.restored:,} that had been deleted from the library came back")
+            text = ("Every new file was read back from the library and matched its source. Nothing in the library "
+                    "was overwritten, and your zips and loose files weren't touched.")
+            return text + (" " + "; ".join(bits) + "." if bits else "")
         if ok:
             return ("Every file was read back from the destination and matched its source checksum. "
                     "Nothing needs to be checked by hand.")
@@ -174,6 +197,26 @@ class SummaryDialog(QDialog):
             ]
         if res.kind == "checksum":
             return [("Files hashed", str(res.files_ok)), ("Manifests", str(res.manifests)), ("Time", dur)]
+        if res.kind == "takeout":
+            src = res.date_sources
+            dated = (src.get("google", 0) + src.get("google+camera", 0))
+            rows = [
+                ("New in the library", f"{res.new:,}"), ("Already there", f"{res.duplicates:,}"),
+                ("Failed", str(res.files_failed)), ("Data written", human_bytes(res.bytes_written)),
+                ("Time", dur), ("Day folders", f"{res.days:,}"),
+                ("Dated by Google", f"{dated:,}"),
+                ("Dated by camera / name", f"{src.get('camera', 0) + src.get('filename', 0):,}"),
+            ]
+            if src.get("filedate"):
+                rows.append(("Dated by file date", f"{src['filedate']:,}"))
+            rows.append(("No date found", f"{res.no_date:,}"))
+            rows.append(("Albums", f"{res.albums:,}"))
+            if res.details_added:
+                rows.append(("Details added later", f"{res.details_added:,}"))
+            if res.refiled:
+                rows.append(("Moved to a better day", f"{res.refiled:,}"))
+            rows.append(("Checksum", res.algo or "n/a"))
+            return rows
         stats = [
             ("Copied + verified", str(res.files_copied)),
             ("Already there", str(res.files_skipped)),

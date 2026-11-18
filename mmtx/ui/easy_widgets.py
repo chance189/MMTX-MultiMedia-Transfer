@@ -363,6 +363,8 @@ class Art(QWidget):
             p.drawEllipse(arc)
         elif k == "choose":
             self._paint_choose(p, W, H)
+        elif k == "photos":
+            self._paint_photos(p, W, H)
         elif k == "backup":
             draw_drive(p, QRectF(W * 0.06, H * 0.25, W * 0.34, H * 0.55), "This computer", P.busy)
             draw_drive(p, QRectF(W * 0.60, H * 0.25, W * 0.34, H * 0.55), "Backup drive", P.done_hi)
@@ -445,6 +447,57 @@ class Art(QWidget):
         p.setOpacity(alpha)
         draw_sd_card(p, QRectF(x, y - ch / 2 + 6, cw, ch), angle=-90 * travel)
         p.setOpacity(1.0)
+
+    def _paint_photos(self, p: QPainter, W: float, H: float) -> None:
+        """Takeout zips (left) -> year, month and day folders (right)."""
+        f = QFont(self.font())
+        f.setPointSizeF(8.5)
+        f.setBold(True)
+        for i in range(3):  # three zip parts, fanned
+            j = 2 - i
+            r = QRectF(W * 0.06 + j * 16, H * 0.18 + j * 14, W * 0.26, H * 0.56)
+            p.setPen(QPen(ink(40), 1))
+            p.setBrush(_two(r, P.art_body[0], P.art_body[1], vertical=True) if j == 0 else QColor(P.art_folders[j]))
+            p.drawRoundedRect(r, 9, 9)
+            if j == 0:
+                cx = r.center().x()
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(P.sub))
+                p.drawRect(QRectF(cx - 1, r.y() + 6, 2, r.height() * 0.42))
+                y = r.y() + 8
+                k = 0
+                while y < r.y() + 6 + r.height() * 0.42:  # zipper teeth either side of the track
+                    p.drawRoundedRect(QRectF(cx - 6 if k % 2 else cx + 1, y, 5, 3), 1, 1)
+                    y += 5
+                    k += 1
+                p.setBrush(QColor(P.busy))
+                p.drawRoundedRect(QRectF(cx - 7, y + 2, 14, 18), 3, 3)
+                p.setFont(f)
+                p.setPen(QColor(P.text))
+                p.drawText(QRectF(r.x(), r.bottom() - 26, r.width(), 18), Qt.AlignCenter, ".zip")
+        y = H * 0.48
+        path = QPainterPath()
+        path.moveTo(W * 0.42, y)
+        path.lineTo(W * 0.53, y)
+        path.moveTo(W * 0.49, y - 9)
+        path.lineTo(W * 0.535, y)
+        path.lineTo(W * 0.49, y + 9)
+        p.setPen(QPen(QColor(P.sub), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+        r = QRectF()
+        for j, name in enumerate(("2026", "2026_01", "2026_01_22")):  # nested: year, month, day
+            r = QRectF(W * 0.56 + j * 16, H * 0.12 + j * 46, W * 0.30, H * 0.30)
+            p.setPen(QPen(ink(40), 1))
+            p.setBrush(QColor(P.art_folders[j]))
+            tab = QPainterPath()
+            tab.addRoundedRect(QRectF(r.x(), r.y() - 8, r.width() * 0.34, 16), 5, 5)
+            tab.addRoundedRect(r, 8, 8)
+            p.drawPath(tab.simplified())
+            p.setFont(f)
+            p.setPen(QColor("#ffffff" if P.dark or j == 0 else "#0f172a"))
+            p.drawText(r.adjusted(10, 6, -8, 0), Qt.AlignLeft | Qt.AlignTop, name)
+        draw_check(p, QPointF(r.right() - 4, r.bottom() - 4), 13, P.done_hi, P.on_done)
 
     def _paint_choose(self, p: QPainter, W: float, H: float) -> None:
         drive = QRectF(W * 0.08, H * 0.58, W * 0.84, H * 0.34)

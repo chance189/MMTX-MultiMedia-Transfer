@@ -1,6 +1,6 @@
 # MMTX · MultiMedia Transfer
 
-A desktop app for getting footage off camera cards and onto archive drives without ever wondering if a file made it. Every file is checksummed on the way in, read back from the destination disk, and compared. If MMTX says it's done, it's bit-perfect.
+A desktop app for getting footage off camera cards and onto archive drives, and Google Photos takeouts into a dated photo library, without ever wondering if a file made it. Every file is checksummed on the way in, read back from the destination disk, and compared. If MMTX says it's done, it's bit-perfect.
 
 Inspired by [mmt](https://github.com/konradit/mmt) and [GPTransfer](https://github.com/omokage-code/GPTransfer). See [Acknowledgements](#acknowledgements).
 
@@ -96,6 +96,43 @@ Copying from a USB device works exactly like a card: each file is read once whil
 
 The Windows device code follows Microsoft's documented WPD calls and is covered by tests through a simulated device, but it hasn't been run against a real phone yet. If a device doesn't show up, the log says why, and the memory card route always works.
 
+## Google Photos takeouts
+
+The **Google Photos** page (and the third tab in Easy mode) turns [Google Takeout](https://takeout.google.com) zips into a plain folder library you own:
+
+```
+Photos/
+  2026/2026_01/2026_01_22/IMG_6367.HEIC
+                         /_google_photos.json        captions, places, people, albums, Google's link
+                         /_mmtx_checksums.xxh128      like every MMTX folder: Verify works on it
+  Unknown date/                                       nothing anywhere said when it was taken
+  _albums.json                                        album -> files (photos are stored once, not per album)
+  _mmtx_library.db                                    index of every photo's checksum
+```
+
+On Takeout, deselect everything, tick Google Photos, keep the .zip format, download every part. Put the zips (and any loose `.MOV` files you saved from Google) in one folder, add that folder (button, or drag it onto the window) and pick the library folder. That's it. The takeout folder can even sit inside the library folder: the library's own year folders are never read back in.
+
+![Google Photos, Advanced](docs/photos_1_advanced_ready.png)
+
+| Easy mode | Importing | Next year's takeout |
+|---|---|---|
+| ![add](docs/photos_5_easy_add.png) | ![importing](docs/photos_8_easy_importing.png) | ![next](docs/photos_10_easy_next_takeout.png) |
+
+What it handles for you:
+
+- **Multi-part exports.** Only each zip's file list is read up front, so planning takes seconds even for 50 GB parts. A photo in part 001 still finds its sidecar in part 002. Missing parts are pointed out, and you can add them later: photos that went in without their details get them, and move to the right day, when the part with their sidecar shows up.
+- **Takeout's sidecar names.** `IMG.jpg.json`, `IMG.jpg.supplemental-metadata.json` and every cut-off variant of it (`.supplemental-meta.json`, `.suppl.json`...), names cut at Takeout's 46/51 character limit, `(1)` moved behind the extension (`IMG.jpg(1).json` belongs to `IMG(1).jpg`), `-edited` copies that share the original's sidecar, Live Photo videos that have none of their own, and a last resort match on the `title` inside the JSON.
+- **Loose files next to the zips.** Photos and videos sitting loose in the folder go in with everything else. Loose files that went in are remembered by path, size and modified time, so the next run skips them; change one and it's looked at again.
+- **The right day.** Google's `photoTakenTime` is what Google Photos shows (including dates you fixed there), but it's UTC. When the camera's own clock describes the same moment (EXIF in a photo, the recording date inside a video), its local date decides the folder, so a photo taken at 7:30 in the morning in Tokyo isn't filed under the previous day just because it was still the evening before at home. When the two disagree by more than a time zone, you changed the date in Google Photos, and Google's date wins. No sidecar: the camera clock (for an iPhone `.MOV`, Apple's creation date with its time zone, else the movie header's UTC time), then a date in the file name (`PXL_20250704_...`, `IMG-20190623-WA0001`), then the upload date, then, for loose files, the file's created date (the earlier of created and modified, since copying a file resets created but keeps modified). The file date comes last on purpose: a file that came out of a takeout is "created" the day you downloaded or unzipped it, while the date inside the video is the day you filmed it. The summary says how many files had to fall back to it.
+- **File dates in the library** are set to the moment the photo or video was taken: modified everywhere, and created too on Windows, so sorting by date in Explorer sorts by shooting date.
+- **Each photo stored once.** Takeout puts album photos in twice (year folder and album folder), and every new takeout contains everything again. MMTX checksums each file as it comes out of the zip; anything the library already has is only read, never written, and its album membership and details are merged. Running the same zips again is instant: completed zips are remembered.
+- **Originals untouched.** The photos are written byte for byte as they are in the zip, read back from the library drive and compared, then renamed into place. Nothing is rewritten inside them; Google's details go in the per-day `_google_photos.json` (which is itself in the checksum file, so Verify covers it). Nothing in the library is ever overwritten: if a file with that name is already in the day folder, MMTX compares checksums. The same file means there's nothing to copy; a different file means both are kept (`IMG_0001.jpg`, `IMG_0001_1.jpg`). The final rename itself refuses to replace anything, even if a file appears at that name mid-import.
+- **Your zips and loose files are never changed or deleted.** With *Unpack through a scratch folder* on (the default), each zip gets `_mmtx_unpack_<zip name>` next to it: a photo is unpacked there, moved into the library and deleted from scratch straight away, and the folder is removed when that zip is done. On the same drive the move is a rename, so it costs nothing; if the zips sit on another drive than the library, each new photo is written twice (scratch, then library). Turn the option off to stream straight from the zip into the library instead.
+- **Left out:** the Trash folder (tick *Include the Trash* to keep it) and anything from other Google products in the same export.
+- Delete a photo from the library and tick *Read zips again*: it comes back.
+
+Google's own API isn't used: since March 2025 it can only list photos an app uploaded itself, and its video downloads are re-encoded copies. Takeout gives you the originals.
+
 ## What it does
 
 | Page | From → To | Grouped by |
@@ -103,6 +140,7 @@ The Windows device code follows Microsoft's documented WPD calls and is covered 
 | **Offload** | SD card / camera → working drive (NVMe) | **Shooting date** → `YYYY_MM_DD_<Title>` folders, with a thumbnail of every clip |
 | **Archive** | Working drive → archive drive (SATA) | **Folder**, sorted into `Archive/YYYY/` (or `YYYY/YYYY_MM/`, or flat) |
 | **Verify** | Any folder or a whole archive drive | Re-reads everything and compares against the recorded checksums |
+| **Google Photos** | Google Takeout zips → photo library | **Day the photo was taken** → `YYYY/YYYY_MM/YYYY_MM_DD/` |
 
 ## Quick start
 
@@ -252,8 +290,13 @@ python tests/gui_easy.py shots/       # Easy mode from a fresh install: custom s
                                       # Advanced mid-transfer, every palette
 python tests/gui_multi.py shots/      # two cards + a phone: background reading, switching, Copy all,
                                       # Offload all cards, unplugging
+python tests/test_takeout.py          # Google Photos: every sidecar naming quirk, split parts, album copies,
+                                      # time zones, re-imports, parts added later, damaged zips, crash recovery,
+                                      # loose .MOVs and their dates, never-overwrite with checksum compare
+python tests/gui_photos.py shots/     # Google Photos page and Easy tab end to end, drag and drop
 python tests/bench.py SRC_DIR DST_DIR # files-at-once benchmark on your own drives
 python tests/make_fake_cards.py out/  # fake GoPro / DJI / Insta360 / FX3 cards to play with
+python tests/make_fake_takeout.py out/ # a fake two-part takeout with all of Takeout's quirks
 ```
 
 Set `MMTX_TEST_WORKERS=3` to run the engine suite with 3 files in flight.
@@ -281,6 +324,11 @@ mmtx/
   ui/session.py  every connected card/device: background reading, status, per-device read limits
   sources.py     where source files come from: paths, or portable://… devices (phones, GoPro over USB)
   wpd.py         Windows Portable Devices backend (comtypes)
+  takeout.py     Google Photos takeouts: zip indexing, sidecar matching, dates, the library index, importer
+  ui/photos_tab.py      Google Photos page (Advanced)
+  ui/photos_session.py  takeouts added in either view, read in the background
+  ui/photos_widgets.py  year chart, drop area
+  ui/easy_photos.py     Easy mode's Google Photos tab
   ui/palettes.py      Easy palettes and the Easy style sheet
 ```
 
@@ -292,6 +340,8 @@ MMTX is written from scratch in Python and contains no code from either project 
 - **[GPTransfer](https://github.com/omokage-code/GPTransfer)** by [omokage-code](https://github.com/omokage-code), MIT. A macOS app for safely transferring GoPro files to a Mac. It treats camera files as read-only, writes incomplete transfers to `.partial` files and verifies before finalizing. MMTX's read-only card handling and `.mmtx-partial` files follow that model, extended with checksums and read-back verification, and its GUI-first approach is why MMTX is a desktop app rather than a CLI.
 
 The Windows phone support was written against Microsoft's [Windows Portable Devices](https://learn.microsoft.com/en-us/windows/win32/wpd_sdk/wpd-application-programming-reference) documentation, using the comtypes call patterns shown in [Heribert17/mtp](https://github.com/Heribert17/mtp) and [KasparNagu/PortableDevices](https://github.com/KasparNagu/PortableDevices) as a guide (no code copied).
+
+The takeout sidecar rules were pieced together from people who mapped Takeout's quirks before: the [TakeoutExtractor](https://github.com/andyjohnson0/TakeoutExtractor) README by andyjohnson0 (the 46 character cut, where Takeout puts `(1)`, `-edited` copies), [Google Photos Takeout Helper](https://github.com/TheLastGimbus/GooglePhotosTakeoutHelper) by TheLastGimbus, and the [ExifTool forum](https://exiftool.org/forum/) threads on the `supplemental-metadata` variants (no code copied).
 
 Built with:
 

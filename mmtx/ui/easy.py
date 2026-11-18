@@ -58,6 +58,7 @@ from ..transfer import free_bytes, human_bytes
 from .clip_grid import ROLE, clip_info
 from .. import sources
 from .easy_clips import ALMOST, EasyClipGrid, NowThumb
+from .easy_photos import PHOTOS_STEPS, PHOTOS_TAB, PhotosFlow
 from .easy_devices import DeviceChip, DeviceGrid, DeviceSwitcher, GuideView, NameBox, device_guide
 from .easy_widgets import (
     Art,
@@ -220,7 +221,7 @@ class HowToTiles(QWidget):
             body.setText(b)
 
 
-class EasyPage(QWidget):
+class EasyPage(PhotosFlow, QWidget):
     def __init__(self, host, parent=None):
         super().__init__(parent)
         self.setObjectName("EasyPage")
@@ -290,8 +291,10 @@ class EasyPage(QWidget):
         self.tab_group = QButtonGroup(self)
         self.tab_copy = self._tab("Copy my card", "card", 0)
         self.tab_arch = self._tab("Move old videos", "archive", 1)
+        self.tab_photos = self._tab("Google Photos", "photos", PHOTOS_TAB)
         top.addWidget(self.tab_copy)
         top.addWidget(self.tab_arch)
+        top.addWidget(self.tab_photos)
         top.addStretch(1)
         self.colors_btn = QPushButton("  Colors")
         self.colors_btn.setObjectName("EasyTop")
@@ -362,7 +365,10 @@ class EasyPage(QWidget):
         host.job_started.connect(self._job_started)
         host.job_event.connect(self._job_event)
         host.job_finished.connect(self._job_finished)
-        (self.tab_arch if self.s.easy_tab == 1 else self.tab_copy).setChecked(True)
+        if self.s.easy_tab not in (0, 1, PHOTOS_TAB):
+            self.s.easy_tab = 0
+        self.tab_group.button(self.s.easy_tab).setChecked(True)
+        self._photos_setup()
         self._paint_icons()
         self._tab_changed(self.s.easy_tab)
         self._stage_sizes()
@@ -376,7 +382,7 @@ class EasyPage(QWidget):
         self.colors_btn.setIcon(icon("palette", P.text, 20))
         self.help_btn.setIcon(icon("search", P.text, 20))
         self.adv_btn.setIcon(icon("settings", P.text, 20))
-        for b in (self.tab_copy, self.tab_arch):
+        for b in (self.tab_copy, self.tab_arch, self.tab_photos):
             b.setIcon(icon(b.property("glyph"), P.text, 22))
 
     def apply_palette(self) -> None:
@@ -422,6 +428,7 @@ class EasyPage(QWidget):
         if self.host.busy and self.stage.currentWidget() is self.run_view:
             return
         self.tracker.set_labels(["Connect", "Choose folder", "Start"] if idx == 0
+                                else PHOTOS_STEPS if idx == PHOTOS_TAB
                                 else ["Videos folder", "Backup drive", "Start"])
         if idx == 1:
             self._scan_archive()
@@ -584,6 +591,8 @@ class EasyPage(QWidget):
         if title != self.title.text() or self.stage.currentWidget() is not self.screen_view:
             self.scroll.verticalScrollBar().setValue(0)  # a new screen starts at the top
         self.stage.setCurrentWidget(self.screen_view)
+        if hasattr(self, "years"):
+            self.years.setVisible(False)  # only the Google Photos Start screen shows the year chart
         self.art.setVisible(bool(art))
         self.art.device = art_device
         self.chip.setVisible(bool(chip))
@@ -673,7 +682,7 @@ class EasyPage(QWidget):
         if self._advancing:
             return  # the green "done" moment; the next step renders right after it
         if self.stage.currentWidget() is self.pick_view:
-            same_tab = (self._pick_kind == "archive") == (self.s.easy_tab == 1)
+            same_tab = self.s.easy_tab != PHOTOS_TAB and (self._pick_kind == "archive") == (self.s.easy_tab == 1)
             same_card = self._pick_kind == "archive" or all(
                 (e := self.host.cards.get(sc.root)) is not None and e.scan is sc for sc in self._pick_scans)
             if same_tab and same_card and not self.host.busy:
@@ -682,7 +691,9 @@ class EasyPage(QWidget):
         if self.stage.currentWidget() is self.run_view and (self.host.busy or self._started_here):
             return
         self._update_switcher()
-        if self.s.easy_tab == 1:
+        if self.s.easy_tab == PHOTOS_TAB:
+            self._render_photos()
+        elif self.s.easy_tab == 1:
             self._render_archive()
         elif self._multi():
             self._render_copy_all()
@@ -1510,6 +1521,7 @@ class EasyPage(QWidget):
         if job.kind not in ("offload", "archive"):
             return
         self._job_kind = job.kind
+        self.r_years.setVisible(False)
         self._readback = bool(getattr(job.options, "verify_readback", True))
         n_files = job.total_files
         if job.kind == "offload":
@@ -1780,6 +1792,14 @@ class EasyPage(QWidget):
              "When something fails, nothing is deleted. Press Start again and only the missing files are copied. "
              "If the same file fails every time, the card or drive may be faulty. The log has the details.",
              [("Open the log folder", lambda: (os.makedirs(logs_dir(), exist_ok=True), open_path(logs_dir())))]),
+            ("How do I bring in my Google Photos?",
+             "On <b>takeout.google.com</b>, deselect everything, tick <b>Google Photos</b>, keep the .zip format and "
+             "download every part. Then open the <b>Google Photos</b> tab here and add the zips (or drag them onto "
+             "this window). Each photo goes in a folder for its day, like <b>2026 › 2026_01 › 2026_01_22</b>. "
+             "Album copies and photos you already have are skipped, captions and places are kept next to the "
+             "photos, and the zips themselves are never changed or deleted. Next year, do the same with a new "
+             "takeout: only the new photos are added.",
+             [("Go to Google Photos", lambda: self.tab_photos.click())]),
             ("Can I change the folder names?",
              f"Yes. The title part (\"{self.s.default_title}\") can be changed for each day in Advanced, on the "
              "Offload page, before copying.", []),

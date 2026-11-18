@@ -88,6 +88,12 @@ def draw_glyph(p: QPainter, name: str, r: QRectF, color: str, width: float = 1.7
         path.addRoundedRect(QRectF(P(3, 5), P(21, 19)), 2 * s, 2 * s)
         path.moveTo(P(3.5, 17)); path.lineTo(P(9, 11.5)); path.lineTo(P(13, 15.5)); path.lineTo(P(15.5, 13)); path.lineTo(P(20.5, 18))
         path.addEllipse(P(16, 9), 1.5 * s, 1.5 * s)
+    elif name == "photos":  # two prints, one behind the other
+        path.moveTo(P(6.5, 5)); path.lineTo(P(6.5, 3.5)); path.lineTo(P(21, 3.5)); path.lineTo(P(21, 15))
+        path.lineTo(P(19, 15))
+        path.addRoundedRect(QRectF(P(3, 6.5), P(18.5, 20.5)), 1.8 * s, 1.8 * s)
+        path.moveTo(P(3.5, 18)); path.lineTo(P(8.5, 13)); path.lineTo(P(12, 16.5)); path.lineTo(P(14, 14.5)); path.lineTo(P(18, 18.5))
+        path.addEllipse(P(13.5, 10.5), 1.4 * s, 1.4 * s)
     elif name == "audio":
         for i, h in enumerate((4, 9, 14, 7, 11, 5)):
             x = 5 + i * 2.8

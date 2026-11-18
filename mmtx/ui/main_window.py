@@ -28,6 +28,8 @@ from .dialogs import SettingsDialog, SummaryDialog
 from .easy import EasyPage
 from .easy_widgets import EasyDialog
 from .offload_tab import OffloadPage
+from .photos_session import TakeoutSession
+from .photos_tab import PhotosTab
 from .progress_panel import ProgressPanel
 from .sidebar import Sidebar, VolumeWatcher
 from .thumbs import ThumbLoader
@@ -88,10 +90,12 @@ class MainWindow(QMainWindow):
         rv.setContentsMargins(26, 20, 26, 18)
         rv.setSpacing(14)
         self.stack = QStackedWidget()
+        self.takeout = TakeoutSession(self)  # Google Photos takeouts, shared with Easy mode
         self.offload = OffloadPage(self)
         self.archive = ArchiveTab(self)
         self.verify = VerifyTab(self)
-        for page in (self.offload, self.archive, self.verify):
+        self.photos = PhotosTab(self)
+        for page in (self.offload, self.archive, self.verify, self.photos):
             self.stack.addWidget(page)
         rv.addWidget(self.stack, 1)
         self.progress = ProgressPanel(self.loader)
@@ -137,6 +141,7 @@ class MainWindow(QMainWindow):
         else:
             self.offload.sync_from_settings()
             self.archive.sync_from_settings()
+            self.photos.sync_from_settings()
         self.update_drives()
 
     # ---------------------------------------------------------------- cards (shared by both views)
@@ -356,7 +361,7 @@ class MainWindow(QMainWindow):
         if SettingsDialog(self.settings, self).exec():
             self.loader.enabled = self.settings.thumbnails
             self._update_mode()
-            for t in (self.offload, self.archive, self.verify):
+            for t in (self.offload, self.archive, self.verify, self.photos):
                 t.settings_changed()
             self.easy.apply_palette()
 
@@ -508,7 +513,7 @@ class MainWindow(QMainWindow):
                 self._worker.wait(15000)
         self.watcher.stop()
         self.archive.shutdown()
-        for w in (self.easy.arch_worker, self._scan_worker):
+        for w in (self.easy.arch_worker, self._scan_worker, self.takeout._worker):
             if w is not None and w.isRunning():
                 w.wait(5000)
         self.loader.clear_queue()
