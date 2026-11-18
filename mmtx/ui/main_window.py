@@ -113,6 +113,7 @@ class MainWindow(QMainWindow):
         self.sidebar.library_clicked.connect(lambda: self.open_library())
         self.library_win = None
         self._catalog_workers: list = []
+        self._previews = None  # PreviewManager, made when first needed
         self.job_finished.connect(self._catalog_after_job)
         self.watcher.changed.connect(self._on_volumes)
         self.cards_changed.connect(lambda: self.sidebar.set_card_statuses(self.cards))
@@ -420,6 +421,9 @@ class MainWindow(QMainWindow):
             self.loader.pause()
         else:
             self.loader.resume()
+        for pm in (self._previews, self.library_win.previews if self.library_win is not None else None):
+            if pm is not None:  # previews never compete with a copy for the drive
+                pm.set_paused(job=b)
         self.busy_changed.emit(b)
 
     def run_transfer(self, job: Job, after: Optional[Callable[[JobResult], None]] = None, on_event=None,
@@ -567,12 +571,29 @@ class MainWindow(QMainWindow):
                 self.library_win.index_folders(root, sorted(folders) if folders else [])
                 continue
             w = Worker(lambda emit, r=root, f=folders: C.index_and_remember(r, sorted(f) if f else None), self)
+            w.bridge.finished.connect(lambda res, r=root, f=folders, k=res.kind: self._previews_after_index(r, f, k, res))
             w.bridge.finished.connect(lambda _r, w=w: self._catalog_workers.remove(w) if w in self._catalog_workers else None)
             w.bridge.failed.connect(lambda tb, w=w: (self.log_line(f"Library catalog: {tb.strip().splitlines()[-1]}")
                                                      if hasattr(self, "log_line") else None,
                                                      self._catalog_workers.remove(w) if w in self._catalog_workers else None))
             self._catalog_workers.append(w)
             w.start()
+
+    def _previews_after_index(self, root: str, folders, kind: str, res_entry) -> None:
+        """Make the new files' Library previews now, while they're on the fast working drive: they're keyed
+        by content, so the archive copy uses them too."""
+        if kind == "archive" or not getattr(self.settings, "library_previews", True):
+            return  # archived folders already have theirs
+        try:
+            _res, entry = res_entry
+        except (TypeError, ValueError):
+            return
+        if self._previews is None:
+            from .lib_prep import PreviewManager
+
+            self._previews = PreviewManager(self)
+            self._previews.set_paused(job=self.busy)
+        self._previews.start([(root, sorted(folders) if folders else None, entry.get("name", ""), entry.get("id", ""))])
 
     def closeEvent(self, e):  # noqa: N802
         if self.busy:
@@ -587,6 +608,8 @@ class MainWindow(QMainWindow):
         self.archive.shutdown()
         if self.library_win is not None:
             self.library_win.close()
+        if self._previews is not None:
+            self._previews.stop()
         for w in [self.easy.arch_worker, self._scan_worker, self.takeout._worker] + list(self._catalog_workers):
             if w is not None and w.isRunning():
                 w.wait(5000)

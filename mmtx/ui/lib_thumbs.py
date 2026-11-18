@@ -1,9 +1,10 @@
-"""Thumbnails and hover filmstrips for MMTX Library.
+"""Thumbnails and hover strips for MMTX Library, served from the preview store (see mmtx/previews.py).
 
-Every thumbnail is cached on this computer per library (keyed by path + size + modified time), so a
-library whose drive is unplugged still shows the pictures you've already scrolled past.
-Video thumbnails come from the low-res proxy (GoPro/Insta360 .LRV, DJI .LRF, Sony SUB) when there is
-one: ~10x cheaper than decoding 5.3K HEVC. HEIC photos need pillow-heif (in requirements).
+Two thread pools, so a preview that's already made never waits behind one being made:
+- load: read the stored JPEG and decode it (about a millisecond);
+- make: build a missing preview with ffmpeg (or from the photo) and store it.
+Both run the newest request first, and a make that's no longer on screen (you scrolled on) is dropped
+before it starts. Decoded pictures stay in memory up to a byte budget, so scrolling back is free.
 """
 
 from __future__ import annotations
@@ -11,18 +12,22 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import threading
 from collections import OrderedDict
 from typing import Optional
 
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal
-from PySide6.QtGui import QImage, QImageReader, QPainter, QPixmap
+from PySide6.QtGui import QImage, QImageReader, QPixmap
 
 from .. import media
+from .. import previews as PV
+from ..previews import video_source
 
-THUMB = 360  # long side of a cached thumbnail
-STRIP_FRAMES = 8
-STRIP_W = 240
-HEIF_EXT = (".heic", ".heif", ".avif", ".hif")
+__all__ = ["ThumbCache", "load_image", "video_source", "legacy_key"]
+
+HEIF_EXT = PV.HEIF_EXT
+THUMB_BUDGET = 256 * 1024 * 1024  # decoded thumbnails kept in memory
+STRIP_KEEP = 24  # decoded hover strips kept in memory (1.8 MB each)
 
 _heif_ready: Optional[bool] = None
 
@@ -41,9 +46,9 @@ def _heif() -> bool:
 
 
 def load_image(path: str, max_side: int = 0) -> Optional[QImage]:
-    """Any photo as a QImage, upright, optionally scaled down so its long side is max_side."""
+    """Any photo as a QImage, upright, optionally scaled down so its long side is max_side (the viewer)."""
     low = path.lower()
-    if low.endswith(HEIF_EXT) or low.endswith((".dng", ".arw", ".cr2", ".cr3", ".nef", ".raf", ".orf", ".rw2", ".gpr")):
+    if low.endswith(HEIF_EXT) or low.endswith(PV.RAW_EXT):
         if low.endswith(HEIF_EXT):
             img = _pil_image(path, max_side)
             if img is not None:
@@ -86,163 +91,258 @@ def _pil_image(path: str, max_side: int) -> Optional[QImage]:
         return None
 
 
-def video_source(root: str, row) -> str:
-    """The cheapest file to pull frames from: the proxy if it's there, else the clip."""
-    if row.proxy:
-        p = os.path.join(root, *row.proxy.split("/"))
-        if os.path.isfile(p):
-            return p
-    return os.path.join(root, *row.path.split("/"))
+def legacy_key(row) -> str:
+    """How MMTX 2.2 named its per-library thumbnail files."""
+    return hashlib.sha1(f"{row.path}|{row.size}|{row.mtime}".encode("utf-8", "surrogatepass")).hexdigest()[:24]
 
 
-class _Emitter(QObject):
-    done = Signal(str, str, QImage)  # kind ('t' or 's'), key, image (null = failed)
+class _Sig(QObject):
+    loaded = Signal(str, str, QImage)  # kind ('t' thumbnail / 's' strip), key, picture
+    absent = Signal(str, str)  # not made yet
+    failed = Signal(str, str)  # can't be made (damaged file, drive offline, no ffmpeg)
+    dropped = Signal(str, str)  # a make nobody's looking at any more
 
 
-class _Task(QRunnable):
-    def __init__(self, emitter: _Emitter, kind: str, key: str, cache_file: str, root: str, row, online: bool):
+class _Load(QRunnable):
+    def __init__(self, cache: "ThumbCache", kind: str, key: str, legacy: str):
         super().__init__()
-        self.e, self.kind, self.key, self.cache_file = emitter, kind, key, cache_file
-        self.root, self.row, self.online = root, row, online
+        self.c, self.kind, self.key, self.legacy = cache, kind, key, legacy
 
     def run(self) -> None:  # noqa: D401
-        img = QImage()
+        s, store = self.c.sig, self.c.store
         try:
-            if os.path.isfile(self.cache_file):
-                img = QImage(self.cache_file)
-            elif self.online:
-                img = self._make()
-                if img is not None and not img.isNull():
-                    os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
-                    tmp = self.cache_file + ".tmp"
-                    if img.save(tmp, "JPG", 82):
-                        os.replace(tmp, self.cache_file)
-        except Exception:  # noqa: BLE001
-            img = QImage()
-        self.e.done.emit(self.kind, self.key, img if img is not None else QImage())
-
-    def _make(self) -> Optional[QImage]:
-        r = self.row
-        if self.kind == "s":
-            return self._strip()
-        if r.kind == "video":
-            src = video_source(self.root, r)
-            at = 1.0 if not r.duration else min(max(0.5, r.duration * 0.15), 8.0)
-            data = media.video_frame_jpeg(src, at=at, width=THUMB)
+            data = store.thumb(self.key) if self.kind == "t" else store.strip(self.key)
+            if data is None and self.kind == "t" and self.legacy and os.path.isfile(self.legacy):
+                with open(self.legacy, "rb") as f:  # a thumbnail MMTX 2.2 made: take it over
+                    data = f.read()
+                store.put(self.key, data)
             if data:
                 img = QImage.fromData(data)
-                return img if not img.isNull() else None
-            return None
-        return load_image(os.path.join(self.root, *r.path.split("/")), THUMB)
+                if not img.isNull():
+                    s.loaded.emit(self.kind, self.key, img)
+                    return
+            if store.is_failed(self.key):
+                s.failed.emit(self.kind, self.key)
+            else:
+                s.absent.emit(self.kind, self.key)
+        except Exception:  # noqa: BLE001
+            s.absent.emit(self.kind, self.key)
 
-    def _strip(self) -> Optional[QImage]:
-        r = self.row
-        src = video_source(self.root, r)
-        dur = r.duration or 0.0
-        frames = []
-        for i in range(STRIP_FRAMES):
-            t = (i + 0.5) / STRIP_FRAMES * dur if dur else i * 1.0
-            data = media.video_frame_jpeg(src, at=t, width=STRIP_W)
-            img = QImage.fromData(data) if data else QImage()
-            frames.append(img)
-        good = [f for f in frames if not f.isNull()]
-        if not good:
-            return None
-        h = good[0].height()
-        out = QImage(STRIP_W * STRIP_FRAMES, h, QImage.Format_RGB32)
-        out.fill(Qt.black)
-        p = QPainter(out)
-        last = good[0]
-        for i, f in enumerate(frames):
-            last = f if not f.isNull() else last
-            p.drawImage(i * STRIP_W, 0, last.scaled(STRIP_W, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
-        p.end()
-        return out
+
+class _Make(QRunnable):
+    def __init__(self, cache: "ThumbCache", kind: str, key: str, row, root: str):
+        super().__init__()
+        self.c, self.kind, self.key, self.row, self.root = cache, kind, key, row, root
+
+    def run(self) -> None:  # noqa: D401
+        c, s = self.c, self.c.sig
+        if not c.wanted(self.kind, self.key):
+            s.dropped.emit(self.kind, self.key)
+            return
+        c.store_demand(+1)
+        try:
+            if not os.path.exists(PV.abs_path(self.root, self.row.path)):
+                s.failed.emit(self.kind, self.key)
+                return
+            thumb, strip = PV.make(self.row, self.root, c.cancel)
+            c.store.put(self.key, thumb, strip)
+            for kind, data in (("t", thumb), ("s", strip)):
+                if data:
+                    img = QImage.fromData(data)
+                    if not img.isNull():
+                        s.loaded.emit(kind, self.key, img)
+            if self.kind == "s" and not strip:
+                s.failed.emit("s", self.key)
+        except PV.Cancelled:
+            s.dropped.emit(self.kind, self.key)
+        except PV.NoTool:
+            s.failed.emit(self.kind, self.key)
+        except Exception as e:  # noqa: BLE001
+            if os.path.exists(PV.abs_path(self.root, self.row.path)):
+                c.store.fail(self.key, str(e) or type(e).__name__)
+            s.failed.emit(self.kind, self.key)
+        finally:
+            c.store_demand(-1)
 
 
 class ThumbCache(QObject):
     ready = Signal(str)  # thumbnail key
     strip_ready = Signal(str)
 
-    def __init__(self, parent=None, mem_items: int = 1200):
+    def __init__(self, parent=None, store: Optional[PV.PreviewStore] = None):
         super().__init__(parent)
-        self.pool = QThreadPool(self)
-        self.pool.setMaxThreadCount(max(2, min(6, (os.cpu_count() or 4))))
+        self.store = store or PV.shared_store()
+        self.load_pool = QThreadPool(self)
+        self.load_pool.setMaxThreadCount(2)
+        self.make_pool = QThreadPool(self)
+        self.make_pool.setMaxThreadCount(max(1, min(3, (os.cpu_count() or 4) // 2)))
+        self.pool = self.make_pool  # older name
         self.mem: OrderedDict[str, QPixmap] = OrderedDict()
+        self.mem_bytes = 0
         self.strips: OrderedDict[str, QPixmap] = OrderedDict()
-        self.missing: set[str] = set()
+        self.missing: set[str] = set()  # tags ('t'/'s' + key) with nothing to show this session
         self.pending: set[str] = set()
-        self.mem_items = mem_items
-        self.dir = ""
+        self.rows: dict[str, object] = {}  # tag -> row, for making
+        self.frame = 0
+        self.last_req: dict[str, int] = {}
+        self.seq = 0
         self.root = ""
         self.online = False
-        self._em = _Emitter()
-        self._em.done.connect(self._done)
+        self.legacy_dir = ""
+        self.cancel = threading.Event()
+        self._dlock = threading.Lock()
+        self.sig = _Sig()
+        self.sig.loaded.connect(self._loaded)
+        self.sig.absent.connect(self._absent)
+        self.sig.failed.connect(self._failed)
+        self.sig.dropped.connect(self._dropped)
+        self.made_on_demand = 0
 
-    def set_library(self, cache_dir: str, root: str, online: bool) -> None:
-        self.pool.clear()
-        self.mem.clear()
-        self.strips.clear()
-        self.missing.clear()
+    # ------------------------------------------------------------ setup
+    def set_library(self, root: str, online: bool, legacy_dir: str = "") -> None:
+        """Previews are keyed by content, so what's in memory stays useful across libraries."""
+        self.load_pool.clear()
+        self.make_pool.clear()
         self.pending.clear()
-        self.dir, self.root, self.online = cache_dir, root, online
+        self.missing.clear()
+        self.rows.clear()
+        self.last_req.clear()
+        self.root, self.online, self.legacy_dir = root, online, legacy_dir
 
+    def reset(self) -> None:
+        """The store was cleared."""
+        self.set_library(self.root, self.online, "")
+        self.mem.clear()
+        self.mem_bytes = 0
+        self.strips.clear()
+
+    def shutdown(self) -> None:
+        """Stop making (running ffmpeg is killed) and wait; usable again afterwards."""
+        self.cancel.set()
+        self.load_pool.clear()
+        self.make_pool.clear()
+        self.make_pool.waitForDone(5000)
+        self.load_pool.waitForDone(2000)
+        self.pending.clear()
+        self.rows.clear()
+        self.cancel.clear()
+
+    def idle(self) -> bool:
+        return not self.pending and self.make_pool.activeThreadCount() == 0 and self.load_pool.activeThreadCount() == 0
+
+    def store_demand(self, d: int) -> None:
+        with self._dlock:
+            self.store.demand = max(0, self.store.demand + d)
+
+    # ------------------------------------------------------------ asking
     @staticmethod
     def key(row) -> str:
-        return hashlib.sha1(f"{row.path}|{row.size}|{row.mtime}".encode("utf-8", "surrogatepass")).hexdigest()[:24]
+        return PV.key_for(row)
 
-    def _file(self, key: str, kind: str) -> str:
-        return os.path.join(self.dir, key[:2], f"{key}{'_s' if kind == 's' else ''}.jpg")
+    def begin_frame(self) -> None:
+        """The grid starts painting: requests from earlier paints that aren't repeated are stale."""
+        self.frame += 1
+        if len(self.last_req) > 20000:
+            cut = self.frame - 3
+            self.last_req = {t: f for t, f in self.last_req.items() if f >= cut or t in self.pending}
 
-    def thumb(self, row) -> Optional[QPixmap]:
+    def wanted(self, kind: str, key: str) -> bool:
+        return self.frame - self.last_req.get(kind + key, -10) <= 1
+
+    def thumb(self, row, keep: bool = False) -> Optional[QPixmap]:
+        """``keep``: asked for outside the grid (viewer poster, drag): never counts as scrolled away."""
         k = self.key(row)
         pm = self.mem.get(k)
         if pm is not None:
             self.mem.move_to_end(k)
             return pm
-        self._request("t", k, row)
+        self._request("t", k, row, True)
+        if keep:
+            self.last_req["t" + k] = 1 << 60
         return None
 
     def strip(self, row) -> Optional[QPixmap]:
         k = self.key(row)
         pm = self.strips.get(k)
         if pm is not None:
+            self.strips.move_to_end(k)
             return pm
-        self._request("s", k, row)
+        self._request("s", k, row, True)
         return None
+
+    def prefetch(self, row) -> None:
+        """Just off screen: load (or make) at lower priority than what's visible."""
+        k = self.key(row)
+        if k not in self.mem:
+            self._request("t", k, row, False)
 
     def is_missing(self, row, kind: str = "t") -> bool:
         return f"{kind}{self.key(row)}" in self.missing
 
-    def _request(self, kind: str, key: str, row) -> None:
-        tag = f"{kind}{key}"
-        if tag in self.pending or tag in self.missing or not self.dir:
+    def _request(self, kind: str, key: str, row, visible: bool) -> None:
+        tag = kind + key
+        self.last_req[tag] = self.frame
+        if tag in self.pending or tag in self.missing:
             return
         self.pending.add(tag)
-        self.pool.start(_Task(self._em, kind, key, self._file(key, kind), self.root, row, self.online),
-                        1 if kind == "t" else 0)
+        self.rows[tag] = row
+        self.seq += 1
+        legacy = ""
+        if kind == "t" and self.legacy_dir:
+            lk = legacy_key(row)
+            legacy = os.path.join(self.legacy_dir, lk[:2], lk + ".jpg")
+        self.load_pool.start(_Load(self, kind, key, legacy), self._prio(visible))
 
-    def _done(self, kind: str, key: str, img: QImage) -> None:
-        tag = f"{kind}{key}"
+    def _prio(self, visible: bool) -> int:
+        return self.seq if visible else self.seq - 1_000_000  # newest first; off-screen after on-screen
+
+    # ------------------------------------------------------------ answers (GUI thread)
+    def _loaded(self, kind: str, key: str, img: QImage) -> None:
+        tag = kind + key
         self.pending.discard(tag)
-        if img.isNull():
-            self.missing.add(tag)
-            if kind == "t":
-                self.ready.emit(key)
-            return
+        self.rows.pop(tag, None)
+        self.missing.discard(tag)
         pm = QPixmap.fromImage(img)
         if kind == "s":
             self.strips[key] = pm
-            while len(self.strips) > 60:
+            self.strips.move_to_end(key)
+            while len(self.strips) > STRIP_KEEP:
                 self.strips.popitem(last=False)
             self.strip_ready.emit(key)
-        else:
-            self.mem[key] = pm
-            while len(self.mem) > self.mem_items:
-                self.mem.popitem(last=False)
+            return
+        old = self.mem.pop(key, None)
+        if old is not None:
+            self.mem_bytes -= old.width() * old.height() * 4
+        self.mem[key] = pm
+        self.mem_bytes += pm.width() * pm.height() * 4
+        while self.mem_bytes > THUMB_BUDGET and len(self.mem) > 1:
+            _k, gone = self.mem.popitem(last=False)
+            self.mem_bytes -= gone.width() * gone.height() * 4
+        self.ready.emit(key)
+
+    def _absent(self, kind: str, key: str) -> None:
+        tag = kind + key
+        row = self.rows.get(tag)
+        if row is None or not self.online:
+            self._failed(kind, key)
+            return
+        if not self.wanted(kind, key):
+            self._dropped(kind, key)
+            return
+        self.seq += 1
+        visible = self.last_req.get(tag, -10) == self.frame
+        self.make_pool.start(_Make(self, kind, key, row, self.root), self._prio(visible))
+        self.made_on_demand += 1
+
+    def _failed(self, kind: str, key: str) -> None:
+        tag = kind + key
+        self.pending.discard(tag)
+        self.rows.pop(tag, None)
+        self.missing.add(tag)
+        if kind == "t":
             self.ready.emit(key)
 
-    def forget_queue(self) -> None:
-        """Scrolled far away: drop requests that haven't started."""
-        self.pool.clear()
-        self.pending.clear()
+    def _dropped(self, kind: str, key: str) -> None:
+        tag = kind + key
+        self.pending.discard(tag)
+        self.rows.pop(tag, None)  # asked again when it's back on screen

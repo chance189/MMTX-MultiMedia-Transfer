@@ -145,16 +145,16 @@ A Google Photos style browser for everything MMTX puts on disk: the working driv
 |---|---|---|
 | ![scrub](docs/lib_2_hover_scrub.png) | ![photos](docs/lib_6b_photos_by_month.png) | ![search](docs/lib_7_search.png) |
 
-**Looking through footage**
+### Looking through footage
 
 - **Every shoot day on one page.** A section per day folder with its title, photo and video counts and total running time, newest first. The scrubber on the right jumps between years. *By month* groups sparse days together (better for phone photos). Tile size: the slider or Ctrl+wheel.
-- **See what's in a clip without opening it.** Move the mouse across a video tile and it scrubs through 8 frames of the clip; the line along the bottom shows where you are. Frames come from the camera's low-res proxy when there is one (GoPro and Insta360 `.LRV`, DJI `.LRF`, Sony `SUB`), so even 5.3K HEVC is quick. Generated once, then cached.
+- **See what's in a clip without opening it.** Move the mouse across a video tile and it scrubs through 8 frames of the clip; the line along the bottom shows where you are. Frames come from the camera's low-res proxy when there is one (GoPro and Insta360 `.LRV`, DJI `.LRF`, Sony `SUB`), so even 5.3K HEVC is quick. Made once per clip (see [Previews](#previews-made-once)).
 - **Badges:** duration, which camera (GoPro, DJI, Insta360, Sony, phone), 360°, RAW, a heart for favorites.
-- **Double-click to open.** Videos play right away, muted (*Sound on* to hear it). *Low-res copy* plays the proxy instead of the full file, which stays smooth on a slow archive drive. Photos, including HEIC and RAW previews, fit the window: wheel to zoom, drag to pan, double-click for 100%. The info panel shows when it was taken and where that date came from, camera, size, caption, place (with a maps link), people, albums, collections, the Google Photos link, the path and the checksum. Keys: ← → previous/next, Space play/pause, F favorite, I info, Esc back.
+- **Double-click to open.** The clip's preview fills the screen straight away and the video takes over as soon as it's playing, muted (*Sound on* to hear it). Clips with a camera proxy start on that *Low-res copy*: it opens at once and stays smooth from a slow archive drive. Untick it for the full-quality file, at the same moment in the clip; the choice is remembered. Photos, including HEIC and RAW previews, fit the window: wheel to zoom, drag to pan, double-click for 100%. The info panel shows when it was taken and where that date came from, camera, size, caption, place (with a maps link), people, albums, collections, the Google Photos link, the path and the checksum. Keys: ← → previous/next, Space play/pause, F favorite, I info, Esc back.
 - **Sidebar:** your libraries, Everything / Photos / Videos / Favorites, Cameras by model (read from the card's own files: GoPro `version.txt`, Sony XML, Insta360 `.insv`, iPhone from Takeout), Google Photos albums, and your collections.
 - **Search** matches every word you type against the file name, shoot title, folder, camera and model, the date (`2026-11-14`, `november 2026`, `nov`), Google captions, people, albums and original names, plus `photo`, `video`, `360` and `raw`. A word with a minus leaves things out: `gopro -dailyrun`.
 
-**Taking files into a project**
+### Taking files into a project
 
 Select (click, Shift-click for a range, Ctrl-click, click a day's header for the whole day, Ctrl+A), then:
 
@@ -167,9 +167,9 @@ Export works like every other MMTX copy: each file is read back and compared, fi
 
 The Library never moves, renames or deletes anything in a library. Favorites and collections are stored in the catalog, not in your files.
 
-**Catalogs**
+### Catalogs
 
-Each library folder holds one catalog file, `_mmtx_library.db` (the same file the Google Photos importer keeps its index in). Indexing only reads file headers: duration, resolution, camera and date. Checksums come from the `_mmtx_checksums` files MMTX already wrote, so nothing gets hashed again. Rescans are incremental by path, size and modified time: unchanged files are only listed, never opened. Opening a library rescans it quietly in the background.
+Each library folder holds one catalog file, `_mmtx_library.db` (the same file the Google Photos importer keeps its index in). Indexing only reads file headers: duration, resolution, camera and date. Checksums come from the `_mmtx_checksums` files MMTX already wrote, so nothing gets hashed again. Rescans are incremental by path, size and modified time: unchanged files are only listed, never opened. Opening a library checks it quietly in the background, and that check only reads day folders whose contents changed since last time (one look per folder, not per file), so even a big archive opens instantly. *Rescan* checks every file.
 
 MMTX keeps catalogs current by itself: when an offload, archive or takeout import finishes, the day folders it touched are indexed in the background, and *Move to archive* drops the moved folders from the working drive's catalog. You only need *Rescan* after changing folders by hand.
 
@@ -183,7 +183,19 @@ YYYY/YYYY_MM/YYYY_MM_DD/          Google Photos library
 Unknown date/
 ```
 
-**Offline.** A copy of each catalog and every thumbnail you've seen stays on the computer (`%APPDATA%\MMTX\libraries` and `%LOCALAPPDATA%\MMTX\cache\library` on Windows). Unplug the archive drive and you can still browse and search it; opening, playing and exporting wait until it's back. On Windows it's found again under a different drive letter too (each library has its own ID).
+### Previews made once
+
+Every photo gets a thumbnail and every clip a thumbnail plus its 8-frame hover strip. They're made once, kept in one file on this computer, and from then on the grid fills straight from it: reopening a library shows every visible tile in well under a second, without touching ffmpeg.
+
+- **In the background.** When a library opens, MMTX Library makes whatever previews are missing for every connected library, the open one first, newest days first. The card at the bottom of the sidebar shows how far along it is and roughly how long is left; *Pause* keeps what's done and picks up where it stopped. What you're looking at always comes first: tiles on screen are made straight away and the background work waits for them, and anything you scroll past before it's made is dropped instead of holding up the tiles you stopped on.
+- **Right after each offload.** MMTX makes the new clips' previews as soon as an offload or a Google Photos import finishes, while the files sit on the fast working drive. It waits whenever a copy is running. (Settings: *Make Library previews right after each offload and import*.)
+- **They follow the files.** Previews are keyed by the checksum MMTX recorded for each file, not by where it is. When a shoot moves to the archive drive, the archive's catalog finds every preview already made.
+- **Cheap to make.** A clip takes one ffmpeg run that seeks straight to 8 keyframes and decodes only those, from the camera's proxy when there is one. iPhone HEICs use the preview Apple stores inside the file (milliseconds instead of a full 12 MP decode). Damaged files are noted once and not retried.
+- **Size:** about 20 to 30 KB per photo and 60 to 100 KB per clip (more detail compresses less), so 15,000 clips take 1 to 1.5 GB. Right-click a library, *Clear all previews* to start over.
+
+![Making previews](docs/lib_9_previews_paused.png)
+
+**Offline.** A copy of each catalog and all the previews stay on the computer (`%APPDATA%\MMTX\libraries` and `%LOCALAPPDATA%\MMTX\cache\previews.db` on Windows). Unplug the archive drive and you can still browse and search it with every picture showing; opening, playing and exporting wait until it's back. On Windows it's found again under a different drive letter too (each library has its own ID).
 
 ![Offline](docs/lib_8_offline.png)
 
@@ -326,6 +338,7 @@ With several files in flight, output names are reserved under a lock, so two car
 - **Keep card folder structure** (for Sony Catalyst Browse, which wants `PRIVATE/M4ROOT/…`).
 - **Rename GoPro chapters** so they sort together: `GX010123.MP4` → `GX0123_01.MP4`.
 - **Thumbnails** on/off.
+- **Library previews** right after each offload and import (on by default).
 - **Phones:** how many recent days to show from a phone (default 30, 0 = all).
 
 ## Notes
@@ -349,6 +362,9 @@ python tests/test_takeout.py          # Google Photos: every sidecar naming quir
                                       # time zones, re-imports, parts added later, damaged zips, crash recovery,
                                       # loose .MOVs and their dates, never-overwrite with checksum compare
 python tests/gui_photos.py shots/     # Google Photos page and Easy tab end to end, drag and drop
+python tests/test_previews.py         # Library previews: one-pass making (rotated, very short, damaged, audio-only),
+                                      # HEIC embedded previews, the store, pause / cancel / resume, yielding to
+                                      # the screen, no ffmpeg, previews following a Move to archive, quick checks
 python tests/test_catalog.py          # Library catalogs: footage drive, archive with Move, saved copy offline,
                                       # photo library search, collections, verified export, never-overwrite
 python tests/gui_library.py shots/    # real GoPro / DJI / Insta360 / FX3 clips offloaded and archived, a takeout
@@ -395,7 +411,9 @@ mmtx/
   ui/library_app.py  MMTX Library window: sidebar, toolbar, selection bar, export dialog, offline handling
   ui/lib_grid.py     the virtualized timeline grid: sections, hover-scrub, year scrubber, selection, drag-out
   ui/lib_viewer.py   photo and video viewer with the info panel
-  ui/lib_thumbs.py   thumbnails and scrub strips on worker threads, disk cache
+  previews.py    Library previews: the store (previews.db), one-pass ffmpeg maker, background prepare()
+  ui/lib_thumbs.py   loads previews for the grid (newest first, scrolled-past work dropped), memory cache
+  ui/lib_prep.py     background preview making for the Library window and for MMTX after its jobs
   ui/palettes.py      Easy palettes and the Easy style sheet
 ```
 

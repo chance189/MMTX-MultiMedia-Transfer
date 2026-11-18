@@ -153,7 +153,17 @@ def main() -> int:
         print("saved", p)
 
     def thumbs_idle():
-        return not w.thumbs.pending and w.thumbs.pool.activeThreadCount() == 0
+        return w.thumbs.idle()
+
+    def visible_rows(win):
+        g = win.grid
+        top, vh = g.verticalScrollBar().value(), g.viewport().height()
+        out = []
+        for i, r in enumerate(g.rows):
+            rc = g._tile_rect(i)
+            if rc.bottom() > top and rc.top() < top + vh:
+                out.append(r)
+        return out
 
     # -------- data
     build_cards(os.path.join(TMP, "cards"))
@@ -190,9 +200,20 @@ def main() -> int:
     grab(w, "lib_0_welcome.png")
 
     # -------- footage drive
+    w.previews.set_paused(user=True)  # hold the background run to see its card
     w.add_library(work)
     wait(lambda: w.cat is not None and w.rows and w.index_worker is None, 120)
     wait(thumbs_idle, 120)
+    wait(lambda: w.prep_box.isVisible(), 30)
+    assert "paused" in w.prep_title.text().lower(), w.prep_title.text()
+    grab(w.side, "lib_9_previews_paused.png")
+    w._toggle_prep_pause()  # resume: everything gets its preview once
+    wait(lambda: not w.previews.busy, 240)
+    assert not w.prep_box.isVisible()
+    from mmtx import previews as PV
+    left = PV.todo(w.cat.query(), w.thumbs.store)
+    assert not left, [r.name for r in left]
+    assert not w.state.get("previews_paused")
     w.grid.viewport().update()
     pump(20)
     devs = {r.device for r in w.rows}
@@ -288,10 +309,35 @@ def main() -> int:
     w.grid.viewport().update()
     pump(20)
     assert not w.online and w.banner.isVisible() and w.rows
-    assert not w.thumbs.is_missing(w.rows[0]), "cached thumbnails should show offline"
+    vis = visible_rows(w)
+    assert vis and all(w.thumbs.key(r) in w.thumbs.mem for r in vis), "every preview should show offline"
     grab(w, "lib_8_offline.png")
     os.rename(work + "_away", work)
     w.close()
+
+    # -------- opening it again: nothing is made, every visible tile comes straight from the store
+    w2 = library_app.LibraryWindow(S())
+    w2.resize(1480, 940)
+    w2.show()
+    t0 = time.time()
+    while not (w2.cat is not None and w2.root == work and w2.rows and visible_rows(w2)
+               and all(w2.thumbs.key(r) in w2.thumbs.mem for r in visible_rows(w2))):
+        app.processEvents()
+        time.sleep(0.002)
+        assert time.time() - t0 < 30, "reopen took too long"
+    reopen_ms = (time.time() - t0) * 1000
+    assert w2.thumbs.made_on_demand == 0, w2.thumbs.made_on_demand
+    print(f"reopened: {len(visible_rows(w2))} visible previews in {reopen_ms:.0f} ms (window, catalog and grid "
+          f"included), 0 made")
+    # a video opens on its poster and the camera's low-res copy
+    vi = next(i for i, r in enumerate(w2.rows) if r.device == "gopro" and r.kind == "video" and r.proxy)
+    w2.open_viewer(vi)
+    pump(3)
+    assert w2.viewer.vposter.pm is not None, "the poster shows at once"
+    assert w2.viewer.proxy_btn.isChecked() and w2.viewer.player.source().toLocalFile().upper().endswith(".LRV")
+    wait(lambda: w2.viewer.vstack.currentWidget() is w2.viewer.video, 20)  # swaps once frames play
+    w2.viewer.close_viewer()
+    w2.close()
 
     # -------- MMTX keeps the catalogs current after its own jobs, and opens the Library
     from mmtx.ui import main_window
@@ -307,7 +353,10 @@ def main() -> int:
     mw._catalog_after_job(Res())
     wait(lambda: not mw._catalog_workers, 60)
     with library_app.C.Catalog(work) as c:
-        assert any(r.title == "Night Ride" for r in c.query()), "the offload's folder wasn't catalogued"
+        night = [r for r in c.query() if r.title == "Night Ride"]
+        assert night, "the offload's folder wasn't catalogued"
+    wait(lambda: mw._previews is not None and not mw._previews.busy, 60)
+    assert not PV.todo(night, PV.shared_store()), "MMTX should make the new clip's preview right away"
     assert mw._library_root_for(os.path.join(photos, "2026", "2026_01", "2026_01_22")) == photos
     mw.open_library(work)
     lw = mw.library_win

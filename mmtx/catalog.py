@@ -79,12 +79,13 @@ CREATE INDEX IF NOT EXISTS media_day ON media(day);
 CREATE INDEX IF NOT EXISTS media_taken ON media(taken);
 CREATE INDEX IF NOT EXISTS media_folder ON media(folder);
 CREATE TABLE IF NOT EXISTS collections(name TEXT, path TEXT, added REAL, PRIMARY KEY(name, path));
+CREATE TABLE IF NOT EXISTS folders(folder TEXT PRIMARY KEY, mtime INTEGER, flat INTEGER);
 """
 
 Row = namedtuple("Row", "path day taken kind fmt device model duration title fav size width height proxy "
-                        "folder name mtime")
+                        "folder name mtime hash")
 _ROW_COLS = "path, day, taken, kind, fmt, device, model, duration, title, fav, size, width, height, proxy, " \
-            "folder, name, mtime"
+            "folder, name, mtime, hash"
 
 
 # ----------------------------------------------------------------------------
@@ -370,9 +371,14 @@ class Catalog:
 
     # ---------------------------------------------------------------- indexing
     def index(self, on_progress: Optional[Callable[[int, int, str], None]] = None,
-              cancel: Optional[threading.Event] = None, folders: Optional[Iterable[str]] = None) -> IndexResult:
+              cancel: Optional[threading.Event] = None, folders: Optional[Iterable[str]] = None,
+              quick: bool = False) -> IndexResult:
         """Bring the catalog up to date with the files on disk. ``folders``: only these day folders
-        (relative), e.g. the ones a job just wrote; default = the whole library."""
+        (relative), e.g. the ones a job just wrote; default = the whole library.
+
+        ``quick``: skip day folders whose own modified time hasn't changed since the last look (adding,
+        removing or renaming a file changes it) and that have no subfolders. One stat per day folder
+        instead of one per file: opening a big archive is instant. Rescan does the full check."""
         if self.read_only:
             raise RuntimeError("this catalog is a read-only copy")
         t0 = time.time()
@@ -389,6 +395,11 @@ class Catalog:
         algo_t = self.get_meta("algo") if self._has_takeout else ""
         with self.lock:
             known = {p: (sz, mt) for p, sz, mt in self.db.execute("SELECT path, size, mtime FROM media")}
+            no_hash = {p for (p,) in self.db.execute("SELECT path FROM media WHERE hash IS NULL OR hash=''")}
+            in_folder: dict[str, list[str]] = {}
+            for p, f in self.db.execute("SELECT path, folder FROM media"):
+                in_folder.setdefault(f, []).append(p)
+            looked = {f: (mt, flat) for f, mt, flat in self.db.execute("SELECT folder, mtime, flat FROM folders")}
         seen: set[str] = set()
         batch = 0
         for i, (folder, day, title) in enumerate(days):
@@ -397,14 +408,28 @@ class Catalog:
             if on_progress:
                 on_progress(i, len(days), folder)
             absdir = os.path.join(self.root, *folder.split("/"))
+            try:
+                dir_mtime = os.stat(lp(absdir)).st_mtime_ns  # before listing: a change while listing shows next time
+            except OSError:
+                continue
+            if quick and in_folder.get(folder) and looked.get(folder) == (dir_mtime, 1):
+                n = len(in_folder[folder])
+                seen.update(in_folder[folder])
+                res.files += n
+                res.unchanged += n
+                continue
             files = []
+            flat = True
             for dp, dns, fns in os.walk(absdir):
                 dns[:] = sorted(d for d in dns if not d.startswith((".", "_mmtx")))
+                if dns:
+                    flat = False
                 for fn in fns:
                     full = os.path.join(dp, fn)
                     files.append((os.path.relpath(full, absdir).replace(os.sep, "/"), full))
             algo, man = load_folder_manifest(absdir)
             proxies = self._proxies(files)
+            errors_before = len(res.errors)
             for rel_in, full in files:
                 kind, fmt = item_kind(rel_in.rsplit("/", 1)[-1])
                 if not kind:
@@ -422,6 +447,9 @@ class Catalog:
                 old = known.get(path)
                 if old and old == (st.st_size, st.st_mtime_ns):
                     res.unchanged += 1
+                    if path in no_hash and man and man.get(rel_in):  # checksum file written after we looked
+                        with self.lock:
+                            self.db.execute("UPDATE media SET hash=? WHERE path=?", (f"{algo}:{man[rel_in]}", path))
                     continue
                 try:
                     row = self._describe(path, full, rel_in, folder, day, title, kind, fmt, dev, st,
@@ -443,8 +471,15 @@ class Catalog:
                     if batch >= 300:
                         self.db.commit()
                         batch = 0
+            if len(res.errors) == errors_before:  # a file we couldn't read gets another look next time
+                with self.lock:
+                    self.db.execute("INSERT OR REPLACE INTO folders VALUES(?,?,?)", (folder, dir_mtime, int(flat)))
         # files that are gone (a folder asked for that no longer exists is gone entirely: archived with Move)
         scope = set(want) if folders is not None else {d[0] for d in days}
+        with self.lock:
+            gone_dirs = [f for f in looked if f not in {d[0] for d in all_days}]
+            for f in gone_dirs:
+                self.db.execute("DELETE FROM folders WHERE folder=?", (f,))
         with self.lock:
             for p in list(known):
                 in_scope = any(p.startswith(s + "/") for s in scope) if folders is not None else True
@@ -827,15 +862,17 @@ def locate(entry: dict) -> Optional[str]:
 
 
 def index_and_remember(root: str, folders: Optional[Iterable[str]] = None, on_progress=None,
-                       cancel=None) -> tuple[IndexResult, dict]:
+                       cancel=None, quick: bool = False) -> tuple[IndexResult, dict]:
     """Index a library (or some of its day folders), save the copy on this computer, register it."""
     with Catalog(root) as cat:
-        res = cat.index(on_progress=on_progress, cancel=cancel, folders=folders)
+        res = cat.index(on_progress=on_progress, cancel=cancel, folders=folders, quick=quick)
         entry = remember_library(cat)
-        try:
-            cat.save_copy(saved_copy_path(entry["id"]))
-        except (OSError, sqlite3.Error):
-            pass
+        copy = saved_copy_path(entry["id"])
+        if res.added or res.updated or res.removed or not os.path.isfile(copy) or not quick:
+            try:
+                cat.save_copy(copy)
+            except (OSError, sqlite3.Error):
+                pass
     return res, entry
 
 

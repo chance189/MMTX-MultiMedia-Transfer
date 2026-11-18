@@ -309,6 +309,10 @@ class SettingsDialog(QDialog):
         self.thumbs = QCheckBox("Show clip thumbnails  (paused automatically while a transfer runs)")
         self.thumbs.setChecked(s.thumbnails)
         th.body.addWidget(self.thumbs)
+        self.lib_previews = QCheckBox("Make Library previews right after each offload and import  "
+                                      "(once per file, while it's on the fast drive; waits while copying)")
+        self.lib_previews.setChecked(s.library_previews)
+        th.body.addWidget(self.lib_previews)
         ff = find_ffmpeg()
         th.body.addWidget(label(
             f"Video frames via ffmpeg: {ff}" if ff else
@@ -369,6 +373,7 @@ class SettingsDialog(QDialog):
         self.s.per_camera_subfolders = self.subfolders.isChecked()
         self.s.workers = int(self.workers.currentData())
         self.s.thumbnails = self.thumbs.isChecked()
+        self.s.library_previews = self.lib_previews.isChecked()
         self.s.easy_palette = self.palette.currentData()
         self.s.phone_recent_days = self.phone_days.value()
         self.s.save()

@@ -42,6 +42,7 @@ class Settings:
     rename_gopro: bool = False
     workers: int = 0  # files at once; 0 = auto by drive type
     thumbnails: bool = True
+    library_previews: bool = True  # make MMTX Library's previews right after each offload / import
     # offload
     offload_dest: str = ""
     default_title: str = "DailyRun"

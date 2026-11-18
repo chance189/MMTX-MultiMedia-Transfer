@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -45,6 +46,7 @@ from ..transfer import free_bytes, human_bytes
 from . import theme
 from .icons import draw_device, draw_glyph
 from .lib_grid import TimelineGrid
+from .lib_prep import PreviewManager, eta_text
 from .lib_thumbs import ThumbCache
 from .lib_viewer import Viewer
 from .widgets import PathPicker, Worker, open_path
@@ -53,6 +55,9 @@ EXTRA_QSS = f"""
 #LibSide {{ background:{theme.SURFACE}; border-right:1px solid {theme.BORDER}; }}
 #LibSection {{ color:{theme.MUTED}; font-size:8.5pt; font-weight:700; letter-spacing:1px; padding:14px 12px 4px 12px; }}
 #LibTitle {{ font-size:15pt; font-weight:800; }}
+#LibPrep {{ background:{theme.BG}; border:1px solid {theme.BORDER}; border-radius:10px; }}
+#LibPrepTitle {{ font-weight:700; }}
+#LibPrepText {{ color:{theme.MUTED}; font-size:9pt; }}
 #LibBanner {{ background:#2a2213; border:1px solid #5a4520; border-radius:10px; color:#f3d9a6; padding:8px 12px; }}
 #LibSelBar {{ background:#1c2840; border-radius:10px; }}
 #LibEmptyTitle {{ font-size:20pt; font-weight:800; }}
@@ -335,6 +340,10 @@ class LibraryWindow(QMainWindow):
         self.index_worker: Optional[Worker] = None
         self._index_queue: list = []
         self.thumbs = ThumbCache(self)
+        self.previews = PreviewManager(self, self.thumbs.store)
+        self.previews.set_paused(user=bool(self.state.get("previews_paused")))
+        self.previews.progress.connect(self._prep_progress)
+        self.previews.finished.connect(self._prep_finished)
         self.setStyleSheet(EXTRA_QSS)
         self.resize(1480, 940)
 
@@ -360,6 +369,35 @@ class LibraryWindow(QMainWindow):
         self.side_box.setSpacing(1)
         self.side_scroll.setWidget(self.side_inner)
         sv.addWidget(self.side_scroll, 1)
+        # background preview making: what it's doing, how long, pause
+        self.prep_box = QFrame()
+        self.prep_box.setObjectName("LibPrep")
+        pv = QVBoxLayout(self.prep_box)
+        pv.setContentsMargins(12, 9, 10, 10)
+        pv.setSpacing(5)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        self.prep_title = QLabel("Making previews")
+        self.prep_title.setObjectName("LibPrepTitle")
+        top.addWidget(self.prep_title, 1)
+        self.prep_btn = QPushButton("Pause")
+        self.prep_btn.setFixedHeight(24)
+        self.prep_btn.setToolTip("Previews are made once and kept on this computer, so the Library opens "
+                                 "instantly from then on. Pausing keeps what's done.")
+        self.prep_btn.clicked.connect(self._toggle_prep_pause)
+        top.addWidget(self.prep_btn)
+        pv.addLayout(top)
+        self.prep_bar = QProgressBar()
+        self.prep_bar.setFixedHeight(5)
+        self.prep_bar.setTextVisible(False)
+        pv.addWidget(self.prep_bar)
+        self.prep_text = QLabel()
+        self.prep_text.setObjectName("LibPrepText")
+        self.prep_text.setWordWrap(True)
+        pv.addWidget(self.prep_text)
+        self.prep_box.setVisible(False)
+        sv.addWidget(self.prep_box)
+        sv.addSpacing(8)
         add = QPushButton("+  Add a library folder")
         add.clicked.connect(self.add_library)
         sv.addWidget(add)
@@ -486,6 +524,8 @@ class LibraryWindow(QMainWindow):
         self.viewer.collect_requested.connect(self.collect)
         self.viewer.reveal_requested.connect(lambda rel: reveal(os.path.join(self.root, *rel.split("/"))))
         self.viewer.index_changed.connect(lambda i: self.grid.ensure_visible(i))
+        self.viewer.prefer_lowres = bool(self.state.get("play_lowres", True))
+        self.viewer.lowres_changed.connect(lambda on: (self.state.__setitem__("play_lowres", on), save_state(self.state)))
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -590,6 +630,8 @@ class LibraryWindow(QMainWindow):
         a_show.setEnabled(bool(online))
         a_ren = m.addAction("Rename…")
         m.addSeparator()
+        a_clear = m.addAction(f"Clear all previews ({human_bytes(self.thumbs.store.size_bytes())})…")
+        m.addSeparator()
         a_rm = m.addAction("Remove from this list")
         act = m.exec(pos)
         if act is a_open:
@@ -604,6 +646,8 @@ class LibraryWindow(QMainWindow):
                 cat = self.cat if self.entry and self.entry["id"] == entry["id"] else None
                 C.rename_library(entry["id"], name.strip(), cat)
                 self.refresh_side()
+        elif act is a_clear:
+            self.clear_previews()
         elif act is a_rm:
             if QMessageBox.question(self, "Remove library", f"Remove {entry.get('name')} from this list?\n\n"
                                     "Nothing on the drive is touched; add the folder again any time.") \
@@ -699,7 +743,7 @@ class LibraryWindow(QMainWindow):
             return
         self.state["last"] = entry["id"]
         save_state(self.state)
-        self.thumbs.set_library(C.thumbs_dir(entry["id"]), self.root, self.online)
+        self.thumbs.set_library(self.root, self.online, C.thumbs_dir(entry["id"]))
         self.filter = {}
         self.search.blockSignals(True)
         self.search.clear()
@@ -712,8 +756,9 @@ class LibraryWindow(QMainWindow):
         self.rescan.setEnabled(self.online)
         self._reload()
         self.library_opened.emit(self.root)
-        if self.online:  # pick up anything new since last time, quietly
-            QTimer.singleShot(400, lambda r=self.root: self._index(r, quiet=True))
+        if self.online:  # pick up anything new since last time, quietly (only changed folders are read)
+            self._start_previews(restart=True)
+            QTimer.singleShot(400, lambda r=self.root: self._index(r, quiet=True, quick=True))
 
     def _reload(self, keep_scroll: bool = False) -> None:
         self._facets = self.cat.facets() if self.cat is not None else {}
@@ -799,16 +844,18 @@ class LibraryWindow(QMainWindow):
                 pass
 
     # ---------------------------------------------------------------- indexing
-    def _index(self, root: str, folders=None, open_after: bool = False, quiet: bool = False) -> None:
+    def _index(self, root: str, folders=None, open_after: bool = False, quiet: bool = False,
+               quick: bool = False) -> None:
         if self.index_worker is not None and self.index_worker.isRunning():
-            self._index_queue.append((root, folders, open_after, quiet))
+            self._index_queue.append((root, folders, open_after, quiet, quick))
             return
         self.index_bar.setVisible(True)
         self.index_bar.setRange(0, 0)
         self.index_label.setText("Checking for new files…" if quiet else "Reading the library…")
 
         def work(emit):
-            return C.index_and_remember(root, folders, on_progress=lambda i, n, f: emit("p", {"i": i, "n": n}))
+            return C.index_and_remember(root, folders, on_progress=lambda i, n, f: emit("p", {"i": i, "n": n}),
+                                        quick=quick)
 
         w = Worker(work, self)
         w.bridge.event.connect(self._index_progress)
@@ -839,6 +886,8 @@ class LibraryWindow(QMainWindow):
                 self.refresh_side()
         else:
             self.refresh_side()
+        if changed:
+            self._start_previews()
         self._next_index()
 
     def _index_failed(self, root: str, tb: str) -> None:
@@ -849,12 +898,74 @@ class LibraryWindow(QMainWindow):
     def _next_index(self) -> None:
         self.index_worker = None
         if self._index_queue:
-            r, f, o, q = self._index_queue.pop(0)
-            self._index(r, f, o, q)
+            r, f, o, q, k = self._index_queue.pop(0)
+            self._index(r, f, o, q, k)
 
     def index_folders(self, root: str, folders: list[str]) -> None:
         """MMTX calls this after a job: update just the day folders it wrote."""
         self._index(root, folders or None, quiet=True)
+
+    # ---------------------------------------------------------------- previews made ahead of time
+    def _start_previews(self, restart: bool = False) -> None:
+        """Every connected library, the open one first."""
+        targets = []
+        if self.entry and self.online:
+            targets.append((self.root, None, self.entry.get("name") or os.path.basename(self.root), self.entry["id"]))
+        for d in C.known_libraries():
+            if self.entry and d["id"] == self.entry["id"]:
+                continue
+            r = C.locate(d)
+            if r:
+                targets.append((r, None, d.get("name") or os.path.basename(r), d["id"]))
+        self.previews.start(targets, restart=restart)
+
+    def _prep_progress(self, p: dict) -> None:
+        total, done = p.get("total", 0), p.get("done", 0)
+        if not total or done >= total:
+            self.prep_box.setVisible(False)
+            return
+        self.prep_box.setVisible(True)
+        paused = p.get("paused")
+        self.prep_title.setText("Previews paused" if paused else "Making previews")
+        self.prep_btn.setText("Resume" if self.previews.user_paused else "Pause")
+        self.prep_bar.setRange(0, total)
+        self.prep_bar.setValue(done)
+        bits = [p.get("name", ""), f"{done:,} of {total:,}"]
+        if paused and self.previews.job_paused and not self.previews.user_paused:
+            bits.append("waiting for MMTX to finish copying")
+        elif not paused:
+            bits.append(eta_text(p.get("left", 0)))
+        self.prep_text.setText("  ·  ".join(b for b in bits if b))
+
+    def _prep_finished(self, tot: dict) -> None:
+        self.prep_box.setVisible(False)
+        if tot.get("made") and self.grid.isVisible():
+            self.grid.viewport().update()
+
+    def _toggle_prep_pause(self) -> None:
+        on = not self.previews.user_paused
+        self.previews.set_paused(user=on)
+        self.state["previews_paused"] = on
+        save_state(self.state)
+        self.prep_btn.setText("Resume" if on else "Pause")
+        self.prep_title.setText("Previews paused" if on else "Making previews")
+        if not on and not self.previews.busy:
+            self._start_previews()
+
+    def clear_previews(self) -> None:
+        size = human_bytes(self.thumbs.store.size_bytes())
+        if QMessageBox.question(
+                self, "Clear all previews",
+                f"Delete every preview on this computer ({size})? Your photos and clips aren't touched. "
+                "Previews are made again in the background, and connected drives need to be plugged in for "
+                "that.") != QMessageBox.Yes:
+            return
+        self.previews.stop()
+        self.thumbs.shutdown()
+        self.thumbs.store.clear()
+        self.thumbs.reset()
+        self.grid.viewport().update()
+        self._start_previews(restart=True)
 
     # ---------------------------------------------------------------- grid actions
     def _selection_changed(self) -> None:
@@ -1005,6 +1116,8 @@ class LibraryWindow(QMainWindow):
         if self.index_worker is not None:
             self.index_worker.wait(3000)
         self.viewer.close_viewer() if self.viewer.isVisible() else None
+        self.previews.stop()
+        self.thumbs.shutdown()
         super().closeEvent(e)
 
 

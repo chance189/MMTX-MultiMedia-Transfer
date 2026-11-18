@@ -88,7 +88,7 @@ class TimelineGrid(QAbstractScrollArea):
         thumbs.strip_ready.connect(lambda _k: self.viewport().update())
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
-        self._idle.setInterval(120)
+        self._idle.setInterval(50)
         self._idle.timeout.connect(self.viewport().update)
 
     # ---------------------------------------------------------------- data
@@ -232,7 +232,8 @@ class TimelineGrid(QAbstractScrollArea):
         fb = QFont(self.font())
         fb.setPointSizeF(8.5)
         fb.setBold(True)
-        requested = 0
+        self.thumbs.begin_frame()
+        first_i = last_i = -1
         while si < len(self.sections) and self.sections[si].y - top < vh:
             s = self.sections[si]
             y0 = s.y - top
@@ -245,9 +246,16 @@ class TimelineGrid(QAbstractScrollArea):
                 if r.bottom() < 0 or r.top() > vh:
                     continue
                 self._paint_tile(p, i, r, fb)
-                requested += 1
+                first_i = i if first_i < 0 else first_i
+                last_i = i
             si += 1
         self._paint_scrubber(p, top, vh)
+        if last_i >= 0:  # a screen above and below, so scrolling finds them ready
+            n = last_i - first_i + 1
+            for i in range(last_i + 1, min(len(self.rows), last_i + 1 + n)):
+                self.thumbs.prefetch(self.rows[i])
+            for i in range(first_i - 1, max(-1, first_i - 1 - n), -1):
+                self.thumbs.prefetch(self.rows[i])
 
     def _paint_header(self, p, s, si, y0, fh, fs) -> None:
         x = PAD
@@ -548,7 +556,7 @@ class TimelineGrid(QAbstractScrollArea):
         md.setUrls([QUrl.fromLocalFile(os.path.join(self.root, *r.path.split("/"))) for r in rows])
         drag = QDrag(self)
         drag.setMimeData(md)
-        pm = self.thumbs.thumb(rows[0])
+        pm = self.thumbs.thumb(rows[0], keep=True)
         if pm is not None:
             drag.setPixmap(pm.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         drag.exec(Qt.CopyAction)

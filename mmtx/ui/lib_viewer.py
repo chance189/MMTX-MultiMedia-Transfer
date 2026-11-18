@@ -138,6 +138,7 @@ class ImageView(QWidget):
 
 
 class Viewer(QWidget):
+    lowres_changed = Signal(bool)  # the low-res copy choice, remembered by the window
     closed = Signal()
     fav_toggled = Signal(str, bool)
     export_requested = Signal(list)
@@ -159,6 +160,9 @@ class Viewer(QWidget):
         self._loaded = _Loaded()
         self._loaded.done.connect(self._image_loaded)
         self.player = None
+        self.prefer_lowres = True  # start clips on the camera's low-res copy: instant and smooth from any drive
+        self._poster_up = False
+        thumbs.ready.connect(self._poster_ready)
         self.setAutoFillBackground(True)
         pal = self.palette()
         pal.setColor(self.backgroundRole(), QColor("#000000"))
@@ -211,7 +215,12 @@ class Viewer(QWidget):
         vv.setSpacing(0)
         self.video = QVideoWidget() if HAVE_VIDEO else QWidget()
         self.video.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        vv.addWidget(self.video, 1)
+        # the saved preview fills the frame until the first video frame is actually playing: no black wait
+        self.vstack = QStackedWidget()
+        self.vposter = ImageView()
+        self.vstack.addWidget(self.vposter)
+        self.vstack.addWidget(self.video)
+        vv.addWidget(self.vstack, 1)
         ctl = QWidget()
         ctl.setStyleSheet("background:#0b0d11;")
         ch = QHBoxLayout(ctl)
@@ -226,7 +235,8 @@ class Viewer(QWidget):
         self.mute_btn = self._btn("Sound off", "", self._toggle_mute, "Videos start muted")
         self.mute_btn.setFixedWidth(96)
         self.proxy_btn = self._btn("Low-res copy", "", self._toggle_proxy,
-                                   "Play the camera's low-res proxy (LRV/LRF): smooth on any computer")
+                                   "Playing the camera's low-res copy (LRV/LRF/SUB): starts at once and stays "
+                                   "smooth from any drive. Untick for the full-quality file.")
         self.proxy_btn.setCheckable(True)
         for w in (self.play_btn, self.pos, self.time, self.mute_btn, self.proxy_btn):
             ch.addWidget(w, 1 if w is self.pos else 0)
@@ -304,13 +314,15 @@ class Viewer(QWidget):
         self.folder_btn.setEnabled(self.online)
         self.export_btn.setEnabled(self.online)
         self._fill_info(r)
-        poster = self.thumbs.thumb(r)
+        poster = self.thumbs.thumb(r, keep=True)
         if r.kind == "video":
             if self.online and HAVE_VIDEO:
                 self.stack.setCurrentWidget(self.video_page)
+                lowres = bool(r.proxy) and self.prefer_lowres and os.path.isfile(self._abs(r.proxy))
                 self.proxy_btn.setVisible(bool(r.proxy))
-                self.proxy_btn.setChecked(False)
-                self._play(self._abs(r.path))
+                self.proxy_btn.setChecked(lowres)
+                self._show_poster(poster)
+                self._play(self._abs(r.proxy if lowres else r.path))
                 return
             self.stack.setCurrentWidget(self.image)
             self.image.set_pixmap(poster, "Connect the drive to play this video" if not self.online
@@ -395,6 +407,8 @@ class Viewer(QWidget):
             self.player.positionChanged.connect(self._pos_changed)
             self.player.playbackStateChanged.connect(
                 lambda s: self.play_btn.setText("Pause" if s == QMediaPlayer.PlayingState else "Play"))
+            self.player.mediaStatusChanged.connect(self._media_status)
+            self.player.errorOccurred.connect(self._media_error)
 
     def _play(self, path: str) -> None:
         self._ensure_player()
@@ -403,7 +417,35 @@ class Viewer(QWidget):
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
 
+    def _show_poster(self, pm) -> None:
+        self._poster_up = True
+        self.vposter.set_pixmap(pm, "")
+        self.vstack.setCurrentWidget(self.vposter)
+
+    def _poster_ready(self, key: str) -> None:
+        """The preview arrived after the clip was opened (first time it's seen)."""
+        if self._poster_up and self.isVisible() and 0 <= self.i < len(self.rows) and self.vposter.pm is None:
+            r = self.rows[self.i]
+            if self.thumbs.key(r) == key:
+                self.vposter.set_pixmap(self.thumbs.thumb(r, keep=True), "")
+
+    def _video_live(self) -> None:
+        if self._poster_up:
+            self._poster_up = False
+            self.vstack.setCurrentWidget(self.video)
+
+    def _media_status(self, st) -> None:
+        if st in (QMediaPlayer.BufferedMedia, QMediaPlayer.EndOfMedia):
+            self._video_live()
+
+    def _media_error(self, *_a) -> None:
+        if self._poster_up and self.player is not None:
+            self.vposter.note = "Can't play this clip here; open it with Show in folder"
+            self.vposter.update()
+
     def _pos_changed(self, ms: int) -> None:
+        if ms > 0:
+            self._video_live()
         if not self.pos.isSliderDown():
             self.pos.setValue(int(ms))
         self.time.setText(f"{_fmt_ms(int(ms))} / {_fmt_ms(int(self.player.duration()))}")
@@ -431,12 +473,15 @@ class Viewer(QWidget):
         r = self.rows[self.i]
         if not r.proxy or self.player is None:
             return
+        self.prefer_lowres = self.proxy_btn.isChecked()
+        self.lowres_changed.emit(self.prefer_lowres)
         at = self.player.position()
         self.player.setSource(QUrl.fromLocalFile(self._abs(r.proxy if self.proxy_btn.isChecked() else r.path)))
         self.player.setPosition(at)
         self.player.play()
 
     def _stop_video(self) -> None:
+        self._poster_up = False
         if self.player is not None:
             self.player.stop()
             self.player.setSource(QUrl())
