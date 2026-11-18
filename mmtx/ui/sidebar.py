@@ -157,6 +157,7 @@ class Sidebar(QFrame):
     card_clicked = Signal(str)
     settings_clicked = Signal()
     easy_clicked = Signal()
+    library_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -219,6 +220,15 @@ class Sidebar(QFrame):
         self.mode = label("", "SideHint")
         self.mode.setWordWrap(True)
         lay.addWidget(self.mode)
+        lb = QPushButton("  Library")
+        lb.setObjectName("Nav")
+        lb.setIcon(icon("photos", "#c3cad8", 20))
+        lb.setIconSize(QSize(18, 18))
+        lb.setCursor(Qt.PointingHandCursor)
+        lb.setToolTip("MMTX Library: browse, search, play and export everything in your libraries")
+        lb.clicked.connect(self.library_clicked.emit)
+        lay.addWidget(lb)
+        self.library_btn = lb
         eb = QPushButton("  Easy mode")
         eb.setObjectName("EasySwitch")
         eb.setIcon(icon("offload", "#ffffff", 20))

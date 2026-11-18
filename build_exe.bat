@@ -8,7 +8,9 @@ if not exist ".venv\Scripts\python.exe" (
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt pyinstaller || exit /b 1
 ".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean --windowed --name MMTX ^
     --icon assets\mmtx.ico --add-data "assets;assets" ^
-    --exclude-module tkinter --collect-submodules mmtx --collect-all imageio_ffmpeg --collect-submodules comtypes launcher.py || exit /b 1
+    --exclude-module tkinter --collect-submodules mmtx --collect-all imageio_ffmpeg --collect-all pillow_heif --collect-submodules comtypes launcher.py || exit /b 1
+rem one exe, two apps: a small starter opens the Library on its own
+> "dist\MMTX\MMTX Library.bat" echo @start "" "%%~dp0MMTX.exe" --library %%*
 echo.
-echo Built: dist\MMTX\MMTX.exe
+echo Built: dist\MMTX\MMTX.exe  (Library: dist\MMTX\MMTX Library.bat, or MMTX.exe --library)
 pause

@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mmtx"
-version = "2.1.0"
-description = "MMTX MultiMedia Transfer: offload camera cards by date, archive by folder, verify everything with checksums"
+version = "2.2.0"
+description = "MMTX MultiMedia Transfer: offload camera cards by date, archive by folder, verify everything with checksums, browse it all in the Library"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["PySide6>=6.6", "xxhash>=3.4", "imageio-ffmpeg>=0.5", "comtypes>=1.4; sys_platform == 'win32'"]
+dependencies = ["PySide6>=6.6", "xxhash>=3.4", "imageio-ffmpeg>=0.5", "Pillow>=10", "pillow-heif>=0.16", "comtypes>=1.4; sys_platform == 'win32'"]
 
 [project.gui-scripts]
 mmtx = "mmtx.app:main"
+mmtx-library = "mmtx.ui.library_app:main"
 
 [tool.setuptools.packages.find]
 include = ["mmtx*"]

@@ -122,8 +122,14 @@ class PhotosTab(QWidget):
             "_google_photos.json (captions, places, people, albums) and a checksum file. "
             f"Albums are listed in {ALBUMS_FILE} instead of copied. Photos with no date at all go in "
             f"'{UNKNOWN_DIR}'.", "Hint", wrap=True))
-        self.open_lib = button("Open library", "Ghost", slot=lambda: open_path(self.s.takeout_library))
-        b.body.addWidget(self.open_lib, 0, Qt.AlignLeft)
+        lib_row = QHBoxLayout()
+        self.browse_lib = button("Browse in Library", "", slot=lambda: host.open_library(self.s.takeout_library),
+                                 icon_name="photos")
+        self.open_lib = button("Open folder", "Ghost", slot=lambda: open_path(self.s.takeout_library))
+        lib_row.addWidget(self.browse_lib)
+        lib_row.addWidget(self.open_lib)
+        lib_row.addStretch(1)
+        b.body.addLayout(lib_row)
         b.body.addStretch(1)
         top.addWidget(b, 2)
         root.addLayout(top, 3)
@@ -265,6 +271,7 @@ class PhotosTab(QWidget):
         self.lib_line.setVisible(has)
         self.lib.refresh_free()
         self.open_lib.setEnabled(bool(self.s.takeout_library) and os.path.isdir(self.s.takeout_library))
+        self.browse_lib.setEnabled(self.open_lib.isEnabled())
         if self.again.isChecked() != ses.reimport:
             self.again.blockSignals(True)
             self.again.setChecked(ses.reimport)

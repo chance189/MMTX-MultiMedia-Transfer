@@ -2,6 +2,8 @@
 
 A desktop app for getting footage off camera cards and onto archive drives, and Google Photos takeouts into a dated photo library, without ever wondering if a file made it. Every file is checksummed on the way in, read back from the destination disk, and compared. If MMTX says it's done, it's bit-perfect.
 
+The **MMTX Library** companion app then lets you browse all of it like Google Photos: every shoot day on one scrolling page, hover a clip to scrub through it, search, play, and pull files out into a project. See [MMTX Library](#mmtx-library).
+
 Inspired by [mmt](https://github.com/konradit/mmt) and [GPTransfer](https://github.com/omokage-code/GPTransfer). See [Acknowledgements](#acknowledgements).
 
 ![Offload](docs/1_offload.png)
@@ -133,6 +135,58 @@ What it handles for you:
 
 Google's own API isn't used: since March 2025 it can only list photos an app uploaded itself, and its video downloads are re-encoded copies. Takeout gives you the originals.
 
+## MMTX Library
+
+A Google Photos style browser for everything MMTX puts on disk: the working drive, the archive drive and the photo library. It runs next to MMTX or on its own. Open it with the **Library** button (MMTX's sidebar, or the top bar in Easy mode), `run_library.bat` / `./run_library.sh`, `MMTX.exe --library` (the build also makes an `MMTX Library` starter), or `python -m mmtx.library [folder]`.
+
+![MMTX Library, footage drive](docs/lib_1_footage.png)
+
+| Hover a clip to scrub through it | Photos, by month | Search |
+|---|---|---|
+| ![scrub](docs/lib_2_hover_scrub.png) | ![photos](docs/lib_6b_photos_by_month.png) | ![search](docs/lib_7_search.png) |
+
+**Looking through footage**
+
+- **Every shoot day on one page.** A section per day folder with its title, photo and video counts and total running time, newest first. The scrubber on the right jumps between years. *By month* groups sparse days together (better for phone photos). Tile size: the slider or Ctrl+wheel.
+- **See what's in a clip without opening it.** Move the mouse across a video tile and it scrubs through 8 frames of the clip; the line along the bottom shows where you are. Frames come from the camera's low-res proxy when there is one (GoPro and Insta360 `.LRV`, DJI `.LRF`, Sony `SUB`), so even 5.3K HEVC is quick. Generated once, then cached.
+- **Badges:** duration, which camera (GoPro, DJI, Insta360, Sony, phone), 360°, RAW, a heart for favorites.
+- **Double-click to open.** Videos play right away, muted (*Sound on* to hear it). *Low-res copy* plays the proxy instead of the full file, which stays smooth on a slow archive drive. Photos, including HEIC and RAW previews, fit the window: wheel to zoom, drag to pan, double-click for 100%. The info panel shows when it was taken and where that date came from, camera, size, caption, place (with a maps link), people, albums, collections, the Google Photos link, the path and the checksum. Keys: ← → previous/next, Space play/pause, F favorite, I info, Esc back.
+- **Sidebar:** your libraries, Everything / Photos / Videos / Favorites, Cameras by model (read from the card's own files: GoPro `version.txt`, Sony XML, Insta360 `.insv`, iPhone from Takeout), Google Photos albums, and your collections.
+- **Search** matches every word you type against the file name, shoot title, folder, camera and model, the date (`2026-11-14`, `november 2026`, `nov`), Google captions, people, albums and original names, plus `photo`, `video`, `360` and `raw`. A word with a minus leaves things out: `gopro -dailyrun`.
+
+**Taking files into a project**
+
+Select (click, Shift-click for a range, Ctrl-click, click a day's header for the whole day, Ctrl+A), then:
+
+- **Drag** the selection straight into Premiere, Resolve, Explorer or Finder. That hands over the files themselves; nothing is copied.
+- **Export...** copies them to a project folder, either flat or in day folders (`2026_11_14_DailyRun/`), keeping the names or putting the date in front (`2026_11_14_GX010001.MP4`).
+- **Add to collection** keeps a named set (an edit, a client, a highlight reel) you can come back to and export again.
+- **Favorite** and **Copy paths**.
+
+Export works like every other MMTX copy: each file is read back and compared, file dates are kept, and a checksum file is left in each destination folder so Verify works on the project too. Nothing in the destination is overwritten: a file with the same name and the same checksum is skipped, a different one is saved as `name_1.ext`.
+
+The Library never moves, renames or deletes anything in a library. Favorites and collections are stored in the catalog, not in your files.
+
+**Catalogs**
+
+Each library folder holds one catalog file, `_mmtx_library.db` (the same file the Google Photos importer keeps its index in). Indexing only reads file headers: duration, resolution, camera and date. Checksums come from the `_mmtx_checksums` files MMTX already wrote, so nothing gets hashed again. Rescans are incremental by path, size and modified time: unchanged files are only listed, never opened. Opening a library rescans it quietly in the background.
+
+MMTX keeps catalogs current by itself: when an offload, archive or takeout import finishes, the day folders it touched are indexed in the background, and *Move to archive* drops the moved folders from the working drive's catalog. You only need *Rescan* after changing folders by hand.
+
+Day folders are found up to four levels down, in any of these layouts, so any footage organized by day can be added as a library, not just MMTX's:
+
+```
+YYYY_MM_DD_Title/                 working drive (Offload)
+YYYY/YYYY_MM_DD_Title/            archive, year folders
+YYYY/YYYY_MM/YYYY_MM_DD_Title/    archive, year and month folders
+YYYY/YYYY_MM/YYYY_MM_DD/          Google Photos library
+Unknown date/
+```
+
+**Offline.** A copy of each catalog and every thumbnail you've seen stays on the computer (`%APPDATA%\MMTX\libraries` and `%LOCALAPPDATA%\MMTX\cache\library` on Windows). Unplug the archive drive and you can still browse and search it; opening, playing and exporting wait until it's back. On Windows it's found again under a different drive letter too (each library has its own ID).
+
+![Offline](docs/lib_8_offline.png)
+
 ## What it does
 
 | Page | From → To | Grouped by |
@@ -141,16 +195,17 @@ Google's own API isn't used: since March 2025 it can only list photos an app upl
 | **Archive** | Working drive → archive drive (SATA) | **Folder**, sorted into `Archive/YYYY/` (or `YYYY/YYYY_MM/`, or flat) |
 | **Verify** | Any folder or a whole archive drive | Re-reads everything and compares against the recorded checksums |
 | **Google Photos** | Google Takeout zips → photo library | **Day the photo was taken** → `YYYY/YYYY_MM/YYYY_MM_DD/` |
+| **Library** | Any of the above | Browse, scrub, search, play, export, collections. Read-only, works offline |
 
 ## Quick start
 
-**Windows:** double-click `run_mmtx.bat`. First launch creates a local `.venv` and installs PySide6, xxhash and imageio-ffmpeg (needs Python 3.10+).
+**Windows:** double-click `run_mmtx.bat` (the Library on its own: `run_library.bat`). First launch creates a local `.venv` and installs PySide6, xxhash, imageio-ffmpeg, Pillow and pillow-heif (needs Python 3.10+).
 
-**Linux / macOS:** `./run_mmtx.sh`
+**Linux / macOS:** `./run_mmtx.sh` (Library: `./run_library.sh`)
 
-**Or:** `pip install .` and then run `mmtx`
+**Or:** `pip install .` and then run `mmtx` or `mmtx-library`
 
-**Standalone .exe (no Python on the target PC):** run `build_exe.bat`, which produces `dist\MMTX\MMTX.exe` (ffmpeg for thumbnails is bundled).
+**Standalone .exe (no Python on the target PC):** run `build_exe.bat`, which produces `dist\MMTX\MMTX.exe` and an `MMTX Library.bat` starter next to it (ffmpeg and the HEIC decoder are bundled).
 
 ## Daily workflow
 
@@ -294,6 +349,11 @@ python tests/test_takeout.py          # Google Photos: every sidecar naming quir
                                       # time zones, re-imports, parts added later, damaged zips, crash recovery,
                                       # loose .MOVs and their dates, never-overwrite with checksum compare
 python tests/gui_photos.py shots/     # Google Photos page and Easy tab end to end, drag and drop
+python tests/test_catalog.py          # Library catalogs: footage drive, archive with Move, saved copy offline,
+                                      # photo library search, collections, verified export, never-overwrite
+python tests/gui_library.py shots/    # real GoPro / DJI / Insta360 / FX3 clips offloaded and archived, a takeout
+                                      # with a HEIC, then the Library end to end: scrub, viewer, export, offline,
+                                      # and MMTX indexing its own jobs
 python tests/bench.py SRC_DIR DST_DIR # files-at-once benchmark on your own drives
 python tests/make_fake_cards.py out/  # fake GoPro / DJI / Insta360 / FX3 cards to play with
 python tests/make_fake_takeout.py out/ # a fake two-part takeout with all of Takeout's quirks
@@ -329,6 +389,13 @@ mmtx/
   ui/photos_session.py  takeouts added in either view, read in the background
   ui/photos_widgets.py  year chart, drop area
   ui/easy_photos.py     Easy mode's Google Photos tab
+  catalog.py     Library catalogs: day folder discovery, header-only indexing, search, collections, saved copies,
+                 verified export
+  library.py     python -m mmtx.library
+  ui/library_app.py  MMTX Library window: sidebar, toolbar, selection bar, export dialog, offline handling
+  ui/lib_grid.py     the virtualized timeline grid: sections, hover-scrub, year scrubber, selection, drag-out
+  ui/lib_viewer.py   photo and video viewer with the info panel
+  ui/lib_thumbs.py   thumbnails and scrub strips on worker threads, disk cache
   ui/palettes.py      Easy palettes and the Easy style sheet
 ```
 
@@ -347,8 +414,9 @@ Built with:
 
 - [Qt for Python (PySide6)](https://doc.qt.io/qtforpython-6/) for the interface
 - [xxHash](https://github.com/Cyan4973/xxHash) by Yann Collet, via [python-xxhash](https://github.com/ifduyue/python-xxhash), for checksums
-- [FFmpeg](https://ffmpeg.org/), via [imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg), for video thumbnails
+- [FFmpeg](https://ffmpeg.org/), via [imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg), for video thumbnails, and as Qt Multimedia's backend for playback in the Library
+- [Pillow](https://python-pillow.org/) and [pillow-heif](https://github.com/bigcat88/pillow_heif) (libheif) for HEIC thumbnails
 - [comtypes](https://github.com/enthought/comtypes) for Windows Portable Devices (Windows only)
 - [PyInstaller](https://pyinstaller.org/) for the standalone build
 
-Each is under its own license. The standalone `.exe` bundles the Qt and FFmpeg binaries, so if you hand it to anyone else, include their license notices with it.
+Each is under its own license. The standalone `.exe` bundles the Qt, FFmpeg and libheif binaries, so if you hand it to anyone else, include their license notices with it.

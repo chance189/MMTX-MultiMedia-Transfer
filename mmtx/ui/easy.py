@@ -296,6 +296,13 @@ class EasyPage(PhotosFlow, QWidget):
         top.addWidget(self.tab_arch)
         top.addWidget(self.tab_photos)
         top.addStretch(1)
+        self.lib_btn = QPushButton("  Library")
+        self.lib_btn.setObjectName("EasyTop")
+        self.lib_btn.setIconSize(QSize(18, 18))
+        self.lib_btn.setCursor(Qt.PointingHandCursor)
+        self.lib_btn.setToolTip("See everything you've saved: search, play clips, export to a project")
+        self.lib_btn.clicked.connect(lambda: self.host.open_library())
+        top.addWidget(self.lib_btn)
         self.colors_btn = QPushButton("  Colors")
         self.colors_btn.setObjectName("EasyTop")
         self.colors_btn.setIconSize(QSize(18, 18))
@@ -379,6 +386,7 @@ class EasyPage(PhotosFlow, QWidget):
 
     # ================================================================ colors
     def _paint_icons(self) -> None:
+        self.lib_btn.setIcon(icon("photos", P.text, 20))
         self.colors_btn.setIcon(icon("palette", P.text, 20))
         self.help_btn.setIcon(icon("search", P.text, 20))
         self.adv_btn.setIcon(icon("settings", P.text, 20))

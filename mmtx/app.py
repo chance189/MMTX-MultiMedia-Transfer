@@ -47,13 +47,19 @@ def make_icon() -> QIcon:
 
 
 def main() -> int:
+    library = "--library" in sys.argv[1:]  # MMTX.exe --library opens the Library on its own
     if sys.platform == "win32":
         try:  # own taskbar icon instead of python.exe's
             import ctypes
 
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("apotheotech.mmtx")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "apotheotech.mmtx.library" if library else "apotheotech.mmtx")
         except Exception:  # noqa: BLE001
             pass
+    if library:
+        from .ui.library_app import main as library_main
+
+        return library_main([a for a in sys.argv[1:] if a != "--library"])
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)

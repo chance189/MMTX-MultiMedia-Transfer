@@ -273,7 +273,7 @@ def main() -> int:
     grab(w, "easy_5_all_saved.png")
     assert w.easy.title.text() == "Everything on this card is saved", w.easy.title.text()
     dest = w.settings.offload_dest
-    days = sorted(os.listdir(dest))
+    days = sorted(n for n in os.listdir(dest) if not n.startswith("_mmtx"))  # MMTX's catalog file sits there too
     print("day folders:", days)
     assert len(days) == 6 and "2026_11_13_Hike" in days, days
     assert all(d.endswith("_Beach_Run") for d in days if d != "2026_11_13_Hike"), days

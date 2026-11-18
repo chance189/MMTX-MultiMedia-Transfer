@@ -173,7 +173,7 @@ def main() -> int:
 
     # every day folder verifies independently; Nov 14 holds all three devices' files
     total = 0
-    for name in sorted(os.listdir(work)):
+    for name in sorted(n for n in os.listdir(work) if not n.startswith("_mmtx")):  # skip MMTX's catalog file
         folder = os.path.join(work, name)
         mpath, algo = find_manifest(folder)
         entries = read_manifest(mpath)

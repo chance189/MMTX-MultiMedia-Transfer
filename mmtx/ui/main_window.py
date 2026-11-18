@@ -110,6 +110,10 @@ class MainWindow(QMainWindow):
         self.sidebar.settings_clicked.connect(self.open_settings)
         self.sidebar.card_clicked.connect(self._card_clicked)
         self.sidebar.easy_clicked.connect(lambda: self.set_easy(True))
+        self.sidebar.library_clicked.connect(lambda: self.open_library())
+        self.library_win = None
+        self._catalog_workers: list = []
+        self.job_finished.connect(self._catalog_after_job)
         self.watcher.changed.connect(self._on_volumes)
         self.cards_changed.connect(lambda: self.sidebar.set_card_statuses(self.cards))
         self.job_event.connect(self._track_job_event)
@@ -502,6 +506,74 @@ class MainWindow(QMainWindow):
         self.progress.append_log("error", tb)
         QMessageBox.critical(self, "Unexpected error", tb[-3000:])
 
+    # ---------------------------------------------------------------- MMTX Library
+    def open_library(self, root: str = "") -> None:
+        """Open the Library window (one per MMTX), optionally at a library folder."""
+        from .library_app import LibraryWindow
+
+        if self.library_win is None:
+            self.library_win = LibraryWindow(self.settings)
+            self.library_win.setWindowIcon(self.windowIcon())
+        w = self.library_win
+        w.show()
+        w.raise_()
+        w.activateWindow()
+        if root and os.path.isdir(root):
+            w.open_root(root)
+
+    @staticmethod
+    def _library_root_for(day_dir: str) -> str:
+        """2026_11_14_Title -> the folder above it, skipping YYYY and YYYY_MM containers."""
+        import re
+
+        parent = os.path.dirname(os.path.normpath(day_dir))
+        if re.fullmatch(r"\d{4}_\d{2}", os.path.basename(parent)):
+            parent = os.path.dirname(parent)
+        if re.fullmatch(r"\d{4}", os.path.basename(parent)):
+            parent = os.path.dirname(parent)
+        return parent
+
+    def _catalog_after_job(self, res) -> None:
+        """Keep the catalogs current: index just the day folders a job wrote (in the background)."""
+        from .. import catalog as C
+
+        if res.kind not in ("offload", "archive", "takeout"):
+            return
+        if not (res.files_copied or res.files_moved or getattr(res, "new", 0) or getattr(res, "refiled", 0)):
+            return
+        jobs: dict[str, Optional[set]] = {}
+        if res.kind == "takeout":
+            if getattr(res, "library", ""):
+                jobs[res.library] = None
+        else:
+            for d in res.dest_dirs:
+                if not C.parse_day_folder(os.path.basename(os.path.normpath(d))):
+                    continue
+                root = self._library_root_for(d)
+                rel = os.path.relpath(d, root).replace(os.sep, "/")
+                jobs.setdefault(root, set()).add(rel)
+            if res.kind == "archive" and res.files_moved:  # the working drive lost those folders
+                for g in res.groups:
+                    src = getattr(g, "source_root", "") or ""
+                    if not src or not C.parse_day_folder(os.path.basename(os.path.normpath(src))):
+                        continue
+                    root = self._library_root_for(src)
+                    if os.path.isfile(os.path.join(root, C.LIBRARY_DB)):
+                        jobs.setdefault(root, set()).add(os.path.relpath(src, root).replace(os.sep, "/"))
+        for root, folders in jobs.items():
+            if not os.path.isdir(root):
+                continue
+            if self.library_win is not None:
+                self.library_win.index_folders(root, sorted(folders) if folders else [])
+                continue
+            w = Worker(lambda emit, r=root, f=folders: C.index_and_remember(r, sorted(f) if f else None), self)
+            w.bridge.finished.connect(lambda _r, w=w: self._catalog_workers.remove(w) if w in self._catalog_workers else None)
+            w.bridge.failed.connect(lambda tb, w=w: (self.log_line(f"Library catalog: {tb.strip().splitlines()[-1]}")
+                                                     if hasattr(self, "log_line") else None,
+                                                     self._catalog_workers.remove(w) if w in self._catalog_workers else None))
+            self._catalog_workers.append(w)
+            w.start()
+
     def closeEvent(self, e):  # noqa: N802
         if self.busy:
             ans = QMessageBox.question(self, "Transfer running", "A transfer is running. Cancel it and quit?")
@@ -513,7 +585,9 @@ class MainWindow(QMainWindow):
                 self._worker.wait(15000)
         self.watcher.stop()
         self.archive.shutdown()
-        for w in (self.easy.arch_worker, self._scan_worker, self.takeout._worker):
+        if self.library_win is not None:
+            self.library_win.close()
+        for w in [self.easy.arch_worker, self._scan_worker, self.takeout._worker] + list(self._catalog_workers):
             if w is not None and w.isRunning():
                 w.wait(5000)
         self.loader.clear_queue()
